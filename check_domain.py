@@ -1,86 +1,104 @@
 import logging
-import os  # required to use env vars
-
+import os
 from dotenv import load_dotenv
 from INWX.Domrobot import ApiClient
 
+# Setup logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     filename="log.txt",
     format='%(asctime)s %(levelname)s:%(message)s')
-load_dotenv()  # load .env file
 
+# Load environment variables
+load_dotenv()
 
+# Initialize API client
 api_client = ApiClient(api_url=ApiClient.API_LIVE_URL, debug_mode=False)
 
+# Utility function to log errors and raise exceptions
+def log_and_raise_error(code, message, context=""):
+    error_message = f"API error {context}. Code: {code}, Message: {message}"
+    logging.error(error_message)
+    raise Exception(error_message)
 
 def login(username, password):
     """Login to INWX"""
     login_result = api_client.login(username, password)
-
     if login_result['code'] == 1000:
+        logging.info("Login successful.")
         return login_result
     else:
-        err_message = 'Api login error. Code: ' + str(login_result['code']) + '  Message: ' + login_result['msg']
-        logging.error(err_message)
-        raise Exception(err_message)
-
+        log_and_raise_error(login_result['code'], login_result['msg'], "during login")
 
 def is_domain_free(domain_name):
-    """Check if the Domain is free"""
-    domain_check_result = api_client.call_api(
-        api_method='domain.check',
-        method_params={'domain': domain_name})
-
+    """Check if the domain is available"""
+    domain_check_result = api_client.call_api('domain.check', {'domain': domain_name})
     if domain_check_result['code'] == 1000:
         checked_domain = domain_check_result['resData']['domain'][0]
-
         if checked_domain['avail']:
+            logging.info(f"Domain {domain_name} is available.")
             return True
         else:
-            err_message = domain_name + ' is not aviable'
-            logging.debug(err_message)
+            logging.info(f"Domain {domain_name} is not available.")
             return False
     else:
-        err_message = 'Api error while checking domain status. Code: ' + str(domain_check_result['code']) + '  Message: ' + domain_check_result['msg']
-        logging.error(err_message)
+        log_and_raise_error(domain_check_result['code'], domain_check_result['msg'], "during domain check")
         return False
-
 
 def get_account_info():
-
-    """Get required account info to buy the domain"""
-    account_check_result = api_client.call_api(api_method='account.info')
-    if account_check_result['code'] == 1000:
-        return account_check_result
+    """Get account information required to buy a domain"""
+    account_info_result = api_client.call_api('account.info')
+    if account_info_result['code'] == 1000:
+        logging.info("Account info retrieved successfully.")
+        return account_info_result['resData']
     else:
-        err_message = 'Api error while getting account info. Code: ' + str(account_check_result['code']) + '  Message: ' + account_check_result['msg']
-        logging.error(err_message)
-
+        log_and_raise_error(account_info_result['code'], account_info_result['msg'], "while fetching account info")
 
 def buy_domain(buy_params):
-    """buy the domain"""
-    domain_buy_result = api_client.call_api(api_method='domain.create', method_params=buy_params)
-
+    """Buy a domain"""
+    domain_buy_result = api_client.call_api('domain.create', buy_params)
     if domain_buy_result['code'] == 1000:
+        logging.info(f"Domain {buy_params['domain']} purchased successfully.")
         return True
     else:
-        err_message = 'Api error while buying domain. Code: ' + str(domain_buy_result['code']) + '  Message: ' + domain_buy_result['msg']
-        logging.debug(err_message)
+        logging.error(f"Failed to purchase domain {buy_params['domain']}. Code: {domain_buy_result['code']}, Message: {domain_buy_result['msg']}")
         return False
 
+def main():
+    try:
+        # Login
+        username = os.getenv('username')
+        password = os.getenv('password')
+        if not username or not password:
+            raise ValueError("Username or password not set in environment variables.")
+        
+        login(username, password)
+        
+        # Get account info
+        account_info = get_account_info()
+        
+        # Read domain list from file
+        with open("domains.txt", encoding='utf-8') as file:
+            domains = file.read().splitlines()
+        
+        # Process domains
+        for domain in domains:
+            if is_domain_free(domain):
+                buy_domain({
+                    'domain': domain,
+                    'registrant': account_info['defaultRegistrant'],
+                    'admin': account_info['defaultAdmin'],
+                    'tech': account_info['defaultTech'],
+                    'billing': account_info['defaultBilling'],
+                    'ns': [os.getenv('ns1'), os.getenv('ns2')]
+                })
+        
+        # Logout
+        api_client.logout()
+        logging.info("Logout successful.")
+    
+    except Exception as e:
+        logging.error(f"An error occurred: {e}")
 
-login(os.getenv('username'), os.getenv('password'))
-account_info = get_account_info()
-domains = open("domains.txt", encoding='utf-8').read().splitlines()
-for domain in domains:
-    if is_domain_free(domain):
-        buy_domain({
-            'domain': domain,
-            'registrant': account_info['resData']['defaultRegistrant'],
-            'admin': account_info['resData']['defaultAdmin'],
-            'tech': account_info['resData']['defaultTech'],
-            'billing': account_info['resData']['defaultBilling'],
-            'ns': [os.getenv('ns1'), os.getenv('ns2')]
-        })
-api_client.logout()
+if __name__ == "__main__":
+    main()
