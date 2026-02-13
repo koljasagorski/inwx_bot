@@ -25,3 +25,7 @@ Wenn du **keine 2FA** nutzt, lass das Feld einfach leer (`shared_secret = ''`). 
 
 ## Todo
 - [ ] Optionale Argumente für die Domain-Registrierung implementieren
+## todo 
+- [ ] Implement the 2fa
+- [ ] Status/Mail when a registration was successful
+- [ ] Implement the optional arguments for domain registration
