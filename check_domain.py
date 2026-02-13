@@ -22,9 +22,9 @@ def log_and_raise_error(code, message, context=""):
     logging.error(error_message)
     raise Exception(error_message)
 
-def login(username, password):
-    """Login to INWX"""
-    login_result = api_client.login(username, password)
+def login(username, password, shared_secret=None):
+    """Login to INWX (mit optionalem 2FA/TOTP)"""
+    login_result = api_client.login(username, password, shared_secret=shared_secret or None)
     if login_result['code'] == 1000:
         logging.info("Login successful.")
         return login_result
@@ -74,9 +74,10 @@ def main():
         # Login
         username = os.getenv('username')
         password = os.getenv('password')
+        shared_secret = os.getenv('shared_secret')
         if not username or not password:
             raise ValueError("Username or password not set in environment variables.")
-        login(username, password)
+        login(username, password, shared_secret=shared_secret)
 
         # Get account info
         account_info = get_account_info()
