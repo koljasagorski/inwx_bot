@@ -1,15 +1,54 @@
 This project is a bot for [INWX.de](https://github.com/inwx) that checks the availability of domains. If a domain is available, the bot automatically registers it through the INWX API.
 
 ## install dependencies
+```
 pip install -r requirements.txt
+```
 
 ## change access data
-fill in your access data into .env.sample and rename it to .env
+Fill in your access data into `.env.sample` and rename it to `.env`.
 
-Most of the required data to buy a domain will be fetched automaticaly. 
-If you want to use custom parameter fill in the data in the .env and pass it to the buy function.
+Most of the required data to buy a domain will be fetched automatically.
+If you want to use custom parameters fill in the data in the `.env` and pass it to the buy function.
+
+## prepare domain list
+Copy `domains.txt.sample` to `domains.txt` and add one domain per line:
+```
+cp domains.txt.sample domains.txt
+```
 
 ## start script
+```
+python check_domain.py
+```
 
-## todo 
+Output: live status per domain on stdout, a summary table, and a CSV
+report (`domain_status.csv` by default). Detailed logs are written to
+`log.txt`.
+
+## configuration
+
+The following environment variables are recognised (all optional except
+`username` / `password`):
+
+| Variable            | Default              | Description                              |
+|---------------------|----------------------|------------------------------------------|
+| `username`          | —                    | INWX login                               |
+| `password`          | —                    | INWX password                            |
+| `ns1`, `ns2`        | —                    | Optional nameservers used on purchase    |
+| `domains_file`      | `domains.txt`        | Path to the input domain list            |
+| `csv_file`          | `domain_status.csv`  | Path to the result CSV                   |
+| `log_file`          | `log.txt`            | Path to the log file                     |
+| `api_delay_seconds` | `1.0`                | Delay between API calls (rate limiting)  |
+
+## development
+
+Install dev dependencies and run the tests / linter:
+```
+pip install -r requirements-dev.txt
+pytest
+ruff check .
+```
+
+## todo
 - [ ] Implement the optional arguments for domain registration
