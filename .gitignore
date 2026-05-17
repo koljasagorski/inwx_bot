@@ -2,3 +2,9 @@ venv/
 .env
 log.txt
 .vscode
+domains.txt
+domain_status.csv
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
