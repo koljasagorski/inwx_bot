@@ -30,7 +30,7 @@ interface RdapEntity {
   vcardArray?: unknown;
 }
 
-interface RdapResponse {
+export interface RdapResponse {
   events?: RdapEvent[];
   status?: string[];
   entities?: RdapEntity[];
@@ -79,7 +79,7 @@ function registrarName(entities: RdapEntity[] | undefined): string | null {
   return null;
 }
 
-function parseRdap(domain: string, data: RdapResponse): WhoisInfo {
+export function parseRdap(domain: string, data: RdapResponse): WhoisInfo {
   return {
     domain,
     source: "rdap",

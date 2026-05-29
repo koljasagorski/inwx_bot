@@ -20,10 +20,10 @@ Workers), and stores the domain list and results in **Workers KV**.
   dashboard, and a per-domain **state** is kept (`state:domains`).
 - A **web dashboard** is served at `/` to view status, edit the domain list,
   trigger a run, view the WHOIS table and the run history, and download the CSV.
-- Optional notifications via a Slack/Discord-compatible webhook — sent only on
-  **change** (a domain newly available / bought / failed, or a new run error),
-  not on every run, plus **expiry alerts** as owned domains approach their
-  renewal date (`EXPIRY_ALERT_DAYS` thresholds).
+- Optional notifications via a Slack/Discord-compatible webhook **and/or
+  Telegram** — sent only on **change** (a domain newly available / bought /
+  failed, or a new run error), not on every run, plus **expiry alerts** as
+  owned domains approach their renewal date (`EXPIRY_ALERT_DAYS` thresholds).
 - A best-effort KV **lock** prevents a manual run from overlapping the cron run.
 
 > **Safety first:** `DRY_RUN` defaults to `"true"`, so out of the box the bot
@@ -92,7 +92,11 @@ Non-secret settings live in `wrangler.toml` under `[vars]`:
 
 Secrets (set with `wrangler secret put`): `INWX_USERNAME`, `INWX_PASSWORD`,
 `ADMIN_TOKEN`, and the optional `INWX_SHARED_SECRET`, `NOTIFY_WEBHOOK_URL`,
+`TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (Telegram notifications),
 `INWX_NS1`, `INWX_NS2`.
+
+Notifications are sent to every configured channel (Slack/Discord webhook and/or
+Telegram). Responses carry a strict CSP and `X-Content-Type-Options: nosniff`.
 
 The schedule is controlled by the `crons` array in `wrangler.toml`.
 
@@ -155,6 +159,7 @@ attempts the real (paid) registration.
 cp .dev.vars.sample .dev.vars   # fill in credentials (gitignored)
 npm run dev                     # wrangler dev
 npm run typecheck               # tsc --noEmit
+npm test                        # vitest run (unit tests in test/)
 ```
 
 Tip: test against the INWX OT&E sandbox first by uncommenting `INWX_API_URL`
