@@ -77,6 +77,18 @@ interface DomainState {
 
 type StateMap = Record<string, DomainState>;
 
+type DomainMode = "watch" | "auto";
+
+interface DomainConfig {
+  domain: string;
+  /** "auto": register when free (unless DRY_RUN); "watch": only report. */
+  mode: DomainMode;
+  /** Skip auto-purchase if the INWX price exceeds this (in account currency). */
+  maxPrice?: number;
+  tags?: string[];
+  notes?: string;
+}
+
 const LIVE_API_URL = "https://api.domrobot.com/jsonrpc/";
 const DOMAINS_KEY = "domains";
 const RESULTS_JSON_KEY = "results:latest.json";
@@ -95,27 +107,55 @@ const INTERESTING_ACTIONS: Action[] = ["would_purchase", "purchased", "purchase_
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const isTrue = (value: string | undefined) => (value ?? "").trim().toLowerCase() === "true";
 
-function parseDomainList(raw: string): string[] {
+/** Normalize one entry (plain string or object) into a DomainConfig. */
+function normalizeConfig(input: unknown): DomainConfig | null {
+  if (typeof input === "string") {
+    const domain = input.trim();
+    return domain ? { domain, mode: "auto" } : null;
+  }
+  if (input && typeof input === "object") {
+    const obj = input as Record<string, unknown>;
+    const domain = String(obj.domain ?? "").trim();
+    if (!domain) return null;
+    const cfg: DomainConfig = { domain, mode: obj.mode === "watch" ? "watch" : "auto" };
+    const maxPrice = Number(obj.maxPrice);
+    if (obj.maxPrice !== undefined && obj.maxPrice !== null && obj.maxPrice !== "" && Number.isFinite(maxPrice)) {
+      cfg.maxPrice = maxPrice;
+    }
+    if (Array.isArray(obj.tags)) {
+      const tags = obj.tags.map((t) => String(t).trim()).filter(Boolean);
+      if (tags.length > 0) cfg.tags = tags;
+    }
+    if (typeof obj.notes === "string" && obj.notes.trim()) cfg.notes = obj.notes.trim();
+    return cfg;
+  }
+  return null;
+}
+
+/** Accepts a JSON array (of strings or objects) or newline-separated domains. */
+function parseDomainConfigs(raw: string): DomainConfig[] {
   const trimmed = raw.trim();
+  let entries: unknown[];
   if (trimmed.startsWith("[")) {
     try {
       const parsed = JSON.parse(trimmed) as unknown;
-      if (Array.isArray(parsed)) {
-        return parsed.map((d) => String(d).trim()).filter(Boolean);
-      }
+      entries = Array.isArray(parsed) ? parsed : [];
     } catch {
-      // fall through to newline parsing
+      entries = trimmed.split(/\r?\n/);
     }
+  } else {
+    entries = trimmed.split(/\r?\n/);
   }
-  return trimmed
-    .split(/\r?\n/)
-    .map((d) => d.trim())
-    .filter(Boolean);
+  return entries.map(normalizeConfig).filter((c): c is DomainConfig => c !== null);
+}
+
+async function loadDomainConfigs(env: Env): Promise<DomainConfig[]> {
+  const raw = await env.INWX_BOT.get(DOMAINS_KEY);
+  return raw ? parseDomainConfigs(raw) : [];
 }
 
 async function loadDomains(env: Env): Promise<string[]> {
-  const raw = await env.INWX_BOT.get(DOMAINS_KEY);
-  return raw ? parseDomainList(raw) : [];
+  return (await loadDomainConfigs(env)).map((c) => c.domain);
 }
 
 function toCsv(statuses: DomainStatus[]): string {
@@ -221,40 +261,51 @@ async function sendWebhook(env: Env, text: string, extra: Record<string, unknown
   }
 }
 
-async function processDomain(
-  client: InwxClient,
-  domain: string,
-  accountInfo: AccountInfo,
-  ns: string[],
-  dryRun: boolean,
-): Promise<DomainStatus> {
-  const available = await client.isDomainFree(domain);
-  if (!available) {
-    return {
-      domain,
-      available: false,
-      action: "skipped",
-      detail: "already registered",
-      api_code: 1000,
-      api_msg: "domain not available",
-    };
-  }
-  if (dryRun) {
-    return { domain, available: true, action: "would_purchase", detail: "dry run – not purchased", api_code: null, api_msg: null };
-  }
-
-  const buyParams: Record<string, unknown> = {
+function buyParamsFor(domain: string, accountInfo: AccountInfo, ns: string[]): Record<string, unknown> {
+  const params: Record<string, unknown> = {
     domain,
     registrant: accountInfo.defaultRegistrant,
     admin: accountInfo.defaultAdmin,
     tech: accountInfo.defaultTech,
     billing: accountInfo.defaultBilling,
   };
-  if (ns.length > 0) buyParams.ns = ns;
+  if (ns.length > 0) params.ns = ns;
+  return params;
+}
 
-  const { success, code, msg } = await client.buyDomain(buyParams);
+async function processDomain(
+  client: InwxClient,
+  cfg: DomainConfig,
+  accountInfo: AccountInfo,
+  ns: string[],
+  dryRun: boolean,
+): Promise<DomainStatus> {
+  const domain = cfg.domain;
+  const { avail, price } = await client.checkDomain(domain);
+  const priceNote = price !== null ? ` (Preis ${price})` : "";
+  const notBought = (detail: string): DomainStatus => ({
+    domain,
+    available: true,
+    action: "would_purchase",
+    detail,
+    api_code: null,
+    api_msg: null,
+  });
+
+  if (!avail) {
+    return { domain, available: false, action: "skipped", detail: "already registered", api_code: 1000, api_msg: "domain not available" };
+  }
+  // Available — decide whether to actually register it.
+  if (cfg.mode === "watch") return notBought(`watch-only${priceNote}`);
+  if (dryRun) return notBought(`dry run – not purchased${priceNote}`);
+  if (cfg.maxPrice !== undefined) {
+    if (price === null) return notBought(`price unknown – skipped (max ${cfg.maxPrice})`);
+    if (price > cfg.maxPrice) return notBought(`over budget – ${price} > max ${cfg.maxPrice}`);
+  }
+
+  const { success, code, msg } = await client.buyDomain(buyParamsFor(domain, accountInfo, ns));
   if (success) {
-    return { domain, available: true, action: "purchased", detail: "success", api_code: code ?? null, api_msg: msg };
+    return { domain, available: true, action: "purchased", detail: `success${priceNote}`, api_code: code ?? null, api_msg: msg };
   }
   return { domain, available: true, action: "purchase_failed", detail: `Code ${code}: ${msg}`, api_code: code ?? null, api_msg: msg };
 }
@@ -275,19 +326,19 @@ async function runCheck(env: Env): Promise<DomainStatus[]> {
 
     const accountInfo = await client.getAccountInfo();
     const ns = [env.INWX_NS1, env.INWX_NS2].filter((v): v is string => Boolean(v));
-    const domains = await loadDomains(env);
+    const configs = await loadDomainConfigs(env);
 
-    for (let i = 0; i < domains.length; i++) {
+    for (let i = 0; i < configs.length; i++) {
       if (i > 0 && delayMs > 0) await sleep(delayMs);
-      const domain = domains[i];
+      const cfg = configs[i];
       try {
-        const status = await processDomain(client, domain, accountInfo, ns, dryRun);
+        const status = await processDomain(client, cfg, accountInfo, ns, dryRun);
         statuses.push(status);
-        console.log(`[${i + 1}/${domains.length}] ${domain} -> ${status.action}`);
+        console.log(`[${i + 1}/${configs.length}] ${cfg.domain} -> ${status.action}`);
       } catch (e) {
         const detail = e instanceof Error ? e.message : String(e);
-        statuses.push({ domain, available: null, action: "error", detail, api_code: null, api_msg: null });
-        console.error(`[${i + 1}/${domains.length}] ${domain} -> error: ${detail}`);
+        statuses.push({ domain: cfg.domain, available: null, action: "error", detail, api_code: null, api_msg: null });
+        console.error(`[${i + 1}/${configs.length}] ${cfg.domain} -> error: ${detail}`);
       }
     }
   } finally {
@@ -296,6 +347,38 @@ async function runCheck(env: Env): Promise<DomainStatus[]> {
     }
   }
   return statuses;
+}
+
+/**
+ * Register a single domain on explicit user request (dashboard "Kaufen").
+ * This is an explicit action and therefore ignores DRY_RUN and the per-domain
+ * watch/auto mode — it always attempts the real purchase.
+ */
+async function buyDomainNow(
+  env: Env,
+  domain: string,
+): Promise<{ ok: boolean; action: Action; detail: string; code?: number }> {
+  if (!env.INWX_USERNAME || !env.INWX_PASSWORD) {
+    return { ok: false, action: "error", detail: "INWX credentials not configured" };
+  }
+  const client = new InwxClient(env.INWX_API_URL || LIVE_API_URL);
+  let loggedIn = false;
+  try {
+    await client.login(env.INWX_USERNAME, env.INWX_PASSWORD, env.INWX_SHARED_SECRET);
+    loggedIn = true;
+    const { avail } = await client.checkDomain(domain);
+    if (!avail) return { ok: false, action: "skipped", detail: "not available" };
+    const accountInfo = await client.getAccountInfo();
+    const ns = [env.INWX_NS1, env.INWX_NS2].filter((v): v is string => Boolean(v));
+    const { success, code, msg } = await client.buyDomain(buyParamsFor(domain, accountInfo, ns));
+    return success
+      ? { ok: true, action: "purchased", detail: "success", code }
+      : { ok: false, action: "purchase_failed", detail: `Code ${code}: ${msg}`, code };
+  } catch (e) {
+    return { ok: false, action: "error", detail: e instanceof Error ? e.message : String(e) };
+  } finally {
+    if (loggedIn) await client.logout().catch(() => {});
+  }
 }
 
 const ACTION_LABELS_DE: Record<Action, string> = {
@@ -546,10 +629,10 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
 
   if (path === "/api/domains") {
     if (request.method === "GET") {
-      return json({ domains: await loadDomains(env) });
+      return json({ domains: await loadDomainConfigs(env) });
     }
     if (request.method === "PUT" || request.method === "POST") {
-      const domains = parseDomainList(await request.text());
+      const domains = parseDomainConfigs(await request.text());
       await env.INWX_BOT.put(DOMAINS_KEY, JSON.stringify(domains));
       return json({ ok: true, count: domains.length, domains });
     }
@@ -565,6 +648,20 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     const outcome = await withLock(env, () => runAndStore(env));
     if (outcome.skipped) return json({ ok: false, error: "a run is already in progress" }, 409);
     return json({ ok: !outcome.result.error, ...outcome.result });
+  }
+
+  if (request.method === "POST" && path === "/api/buy") {
+    let body: { domain?: string } = {};
+    try {
+      body = (await request.json()) as { domain?: string };
+    } catch {
+      // ignore malformed body
+    }
+    const domain = (body.domain ?? "").trim();
+    if (!domain) return json({ ok: false, error: "domain required" }, 400);
+    const outcome = await withLock(env, () => buyDomainNow(env, domain));
+    if (outcome.skipped) return json({ ok: false, error: "a run is already in progress" }, 409);
+    return json({ domain, ...outcome.result });
   }
 
   if (request.method === "GET" && path === "/api/whois") {

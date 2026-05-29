@@ -40,7 +40,7 @@ main{max-width:980px;margin:0 auto;padding:20px;display:flex;flex-direction:colu
 .btn:disabled{opacity:.5;cursor:not-allowed}
 .btn-primary{background:var(--primary);color:var(--primary-fg);border-color:var(--primary)}
 .btn-ghost{background:transparent}
-input,textarea{font:inherit;width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--fg)}
+input,textarea,select{font:inherit;width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--fg)}
 textarea{resize:vertical}
 table{width:100%;border-collapse:collapse;font-size:14px}
 th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}
@@ -101,8 +101,15 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
         <h2>Domain-Liste</h2>
         <span id="domain-count" class="muted"></span>
       </div>
-      <textarea id="domains" rows="8" placeholder="eine Domain pro Zeile, z. B. example.de"></textarea>
+      <p class="muted">Modus <b>auto</b> registriert verfügbare Domains automatisch (sofern nicht im Probelauf); <b>watch</b> meldet nur. Max-Preis verhindert teure Auto-Käufe.</p>
+      <div class="table-wrap">
+        <table id="domains-table">
+          <thead><tr><th>Domain</th><th>Modus</th><th>Max-Preis</th><th>Tags</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
       <div class="actions mt">
+        <button id="add-domain" class="btn">+ Zeile</button>
         <button id="save-domains" class="btn btn-primary">Speichern</button>
         <span id="domains-msg" class="muted" hidden></span>
       </div>
@@ -115,7 +122,7 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
       </div>
       <div class="table-wrap">
         <table id="results">
-          <thead><tr><th>Domain</th><th>Verfügbar</th><th>Status</th><th>Detail</th><th>Code</th></tr></thead>
+          <thead><tr><th>Domain</th><th>Verfügbar</th><th>Status</th><th>Detail</th><th>Code</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -229,8 +236,27 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
       var c3 = document.createElement('td'); c3.appendChild(badge(s.action)); tr.appendChild(c3);
       var c4 = document.createElement('td'); c4.textContent = s.detail || ''; tr.appendChild(c4);
       var c5 = document.createElement('td'); c5.textContent = (s.api_code === null || s.api_code === undefined) ? '' : String(s.api_code); tr.appendChild(c5);
+      var c6 = document.createElement('td');
+      if (s.action === 'would_purchase') {
+        var bb = document.createElement('button'); bb.className = 'btn'; bb.textContent = 'Kaufen';
+        (function (dom, button) { button.addEventListener('click', function () { buyDomain(dom, button); }); })(s.domain, bb);
+        c6.appendChild(bb);
+      }
+      tr.appendChild(c6);
       tbody.appendChild(tr);
     }
+  }
+
+  function buyDomain(domain, button) {
+    if (!window.confirm('Domain wirklich kostenpflichtig registrieren: ' + domain + ' ?')) { return; }
+    button.disabled = true; button.textContent = 'Kaufe…';
+    api('/api/buy', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ domain: domain }) })
+      .then(function (r) { if (r.status === 401) { throw { auth: true }; } return r.json(); })
+      .then(function (res) {
+        window.alert(res.ok ? ('Gekauft: ' + domain) : ('Nicht gekauft: ' + (res.detail || res.error || 'Fehler')));
+        loadResults(); loadHistory();
+      })
+      .catch(function (e) { window.alert((e && e.auth) ? 'Nicht autorisiert.' : 'Fehler beim Kauf.'); button.disabled = false; button.textContent = 'Kaufen'; });
   }
 
   function setMode(dryRun) {
@@ -264,15 +290,74 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
     });
   }
 
+  function makeInput(type, value, placeholder, cls) {
+    var inp = document.createElement('input');
+    inp.type = type;
+    if (value !== undefined && value !== null) { inp.value = value; }
+    if (placeholder) { inp.placeholder = placeholder; }
+    if (cls) { inp.className = cls; }
+    return inp;
+  }
+
+  function makeModeSelect(value) {
+    var sel = document.createElement('select'); sel.className = 'd-mode';
+    var modes = [['auto', 'auto (kauft)'], ['watch', 'watch (beobachtet)']];
+    var i;
+    for (i = 0; i < modes.length; i++) {
+      var o = document.createElement('option'); o.value = modes[i][0]; o.textContent = modes[i][1];
+      if (modes[i][0] === value) { o.selected = true; }
+      sel.appendChild(o);
+    }
+    return sel;
+  }
+
+  function addDomainRow(cfg) {
+    cfg = cfg || {};
+    var tr = document.createElement('tr');
+    var c1 = document.createElement('td'); c1.appendChild(makeInput('text', cfg.domain || '', 'example.de', 'd-domain')); tr.appendChild(c1);
+    var c2 = document.createElement('td'); c2.appendChild(makeModeSelect(cfg.mode === 'watch' ? 'watch' : 'auto')); tr.appendChild(c2);
+    var c3 = document.createElement('td');
+    var price = makeInput('number', (cfg.maxPrice !== undefined && cfg.maxPrice !== null) ? cfg.maxPrice : '', '', 'd-price');
+    price.min = '0'; price.step = '0.01'; c3.appendChild(price); tr.appendChild(c3);
+    var c4 = document.createElement('td'); c4.appendChild(makeInput('text', (cfg.tags || []).join(', '), 'tag1, tag2', 'd-tags')); tr.appendChild(c4);
+    var c5 = document.createElement('td');
+    var rm = document.createElement('button'); rm.className = 'btn'; rm.textContent = '✕';
+    rm.addEventListener('click', function () { tr.parentNode.removeChild(tr); });
+    c5.appendChild(rm); tr.appendChild(c5);
+    el('domains-table').querySelector('tbody').appendChild(tr);
+  }
+
+  function renderDomains(list) {
+    var tbody = el('domains-table').querySelector('tbody'); clearNode(tbody);
+    list = list || [];
+    var i;
+    for (i = 0; i < list.length; i++) { addDomainRow(list[i]); }
+    el('domain-count').textContent = list.length + ' Domains';
+  }
+
+  function collectDomains() {
+    var rows = el('domains-table').querySelectorAll('tbody tr');
+    var out = [];
+    var i;
+    for (i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      var domain = row.querySelector('.d-domain').value.trim();
+      if (!domain) { continue; }
+      var cfg = { domain: domain, mode: row.querySelector('.d-mode').value === 'watch' ? 'watch' : 'auto' };
+      var priceVal = row.querySelector('.d-price').value.trim();
+      if (priceVal !== '') { var p = Number(priceVal); if (!isNaN(p)) { cfg.maxPrice = p; } }
+      var tagsVal = row.querySelector('.d-tags').value.trim();
+      if (tagsVal !== '') { cfg.tags = tagsVal.split(',').map(function (t) { return t.trim(); }).filter(Boolean); }
+      out.push(cfg);
+    }
+    return out;
+  }
+
   function loadDomains() {
     return api('/api/domains').then(function (r) {
       if (r.status === 401) { throw { auth: true }; }
       return r.json();
-    }).then(function (j) {
-      var list = (j && j.domains) || [];
-      el('domains').value = list.join(String.fromCharCode(10));
-      el('domain-count').textContent = list.length + ' Domains';
-    });
+    }).then(function (j) { renderDomains((j && j.domains) || []); });
   }
 
   function renderWhois(rec) {
@@ -383,10 +468,12 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
   el('logout').addEventListener('click', function () { setToken(''); showApp(false); });
   el('refresh').addEventListener('click', function () { loadResults(); loadHistory(); });
 
+  el('add-domain').addEventListener('click', function () { addDomainRow({ mode: 'auto' }); });
+
   el('save-domains').addEventListener('click', function () {
     var btn = this; btn.disabled = true;
     var msg = el('domains-msg'); show(msg, true); msg.textContent = 'Speichere…';
-    api('/api/domains', { method: 'PUT', headers: { 'content-type': 'text/plain' }, body: el('domains').value })
+    api('/api/domains', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(collectDomains()) })
       .then(function (r) { if (r.status === 401) { throw { auth: true }; } return r.json(); })
       .then(function (j) { msg.textContent = 'Gespeichert: ' + j.count + ' Domains'; el('domain-count').textContent = j.count + ' Domains'; })
       .catch(function (e) { msg.textContent = (e && e.auth) ? 'Nicht autorisiert.' : 'Fehler beim Speichern.'; })
