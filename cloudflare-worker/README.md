@@ -110,11 +110,21 @@ enter your `ADMIN_TOKEN` once (kept in the browser's `sessionStorage`) to
 - edit the domain list in a table (mode `auto`/`watch`, max price, tags),
 - **buy an available domain on demand** ("Kaufen" button, with confirmation),
 - trigger a check immediately ("Jetzt prüfen"),
+- run an ad-hoc **quick check** for a domain or a keyword across several TLDs,
 - view the **WHOIS / domain-status table** (registered / expires / last changed /
   status per domain; expiry within 30 days is highlighted) and refresh it,
-- review the run **history**, and download the results as CSV.
+- review the run **history** and the **audit log**, and download the CSV,
+- change **settings** (dry-run, API delay, expiry thresholds) without redeploying.
 
-A strict Content-Security-Policy (nonce-based, no external assets) is applied.
+A strict Content-Security-Policy (nonce-based, no external assets) is applied,
+and the admin token is protected by per-IP brute-force throttling.
+
+### Settings overrides
+
+`wrangler.toml` `[vars]` provide the safe defaults; the dashboard (or
+`PUT /api/settings`) can override `dryRun`, `apiDelayMs` and `expiryAlertDays`
+at runtime — stored in KV (`settings:config`) and applied without a redeploy.
+Toggling dry-run off from the dashboard asks for confirmation first.
 
 ### WHOIS / domain status
 
@@ -147,11 +157,16 @@ The table refreshes on each cron run and via the "WHOIS aktualisieren" button.
 | `GET /api/whois`          | WHOIS/registration metadata per domain (last refresh).   |
 | `POST /api/whois/refresh` | Refresh WHOIS data now (`?async=true` for background).    |
 | `GET /api/history`        | Recent run history (capped list, newest first).          |
+| `GET /api/settings`       | Effective settings + the stored KV override.             |
+| `PUT /api/settings`       | Override `dryRun` / `apiDelayMs` / `expiryAlertDays`.    |
+| `POST /api/check`         | Ad-hoc check: `{"domain"}` or `{"keyword","tlds":[]}`.   |
+| `GET /api/audit`          | Recent admin actions (capped, newest first).             |
 
-`POST /api/run`, `POST /api/whois/refresh` and `POST /api/buy` return `409` if
-another run is already in progress (best-effort KV lock). `POST /api/buy` is an
-explicit action and **ignores `DRY_RUN` and the per-domain mode** — it always
-attempts the real (paid) registration.
+`POST /api/run`, `POST /api/whois/refresh`, `POST /api/buy` and `POST /api/check`
+return `409` if another run is already in progress (best-effort KV lock).
+`POST /api/buy` is an explicit action and **ignores `DRY_RUN` and the per-domain
+mode** — it always attempts the real (paid) registration. After too many failed
+token attempts from one IP, protected endpoints return `429` for a few minutes.
 
 ## Local development
 
