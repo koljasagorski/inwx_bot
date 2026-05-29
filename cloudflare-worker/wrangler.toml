@@ -22,5 +22,7 @@ API_DELAY_MS = "1000"
 # SAFETY: while "true" the bot only reports available domains and never buys.
 # Set to "false" (and redeploy) to actually register free domains.
 DRY_RUN = "true"
+# Expiry-alert thresholds in days (comma-separated) for the WHOIS table.
+EXPIRY_ALERT_DAYS = "30,14,7,1"
 # Uncomment to test against the INWX OT&E sandbox instead of production:
 # INWX_API_URL = "https://api.ote.domrobot.com/jsonrpc/"

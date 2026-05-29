@@ -13,10 +13,15 @@ Workers), and stores the domain list and results in **Workers KV**.
 - Results are written to KV (`results:latest.json` and `results:latest.csv`).
 - It also refreshes **WHOIS/registration metadata** per domain (registered /
   expires / last changed / status) and stores it in KV (`whois:latest.json`).
+- Each run is recorded in a capped **history** (`history:runs`) shown in the
+  dashboard, and a per-domain **state** is kept (`state:domains`).
 - A **web dashboard** is served at `/` to view status, edit the domain list,
-  trigger a run, view the WHOIS table, and download the CSV.
-- Optional: a notification is POSTed to a Slack/Discord-compatible webhook when
-  something noteworthy happens (a domain is available, bought, or a run fails).
+  trigger a run, view the WHOIS table and the run history, and download the CSV.
+- Optional notifications via a Slack/Discord-compatible webhook — sent only on
+  **change** (a domain newly available / bought / failed, or a new run error),
+  not on every run, plus **expiry alerts** as owned domains approach their
+  renewal date (`EXPIRY_ALERT_DAYS` thresholds).
+- A best-effort KV **lock** prevents a manual run from overlapping the cron run.
 
 > **Safety first:** `DRY_RUN` defaults to `"true"`, so out of the box the bot
 > only *reports* available domains and never spends money. Set it to `"false"`
@@ -69,9 +74,10 @@ Non-secret settings live in `wrangler.toml` under `[vars]`:
 
 | Variable        | Default                              | Description                                   |
 |-----------------|--------------------------------------|-----------------------------------------------|
-| `DRY_RUN`       | `"true"`                             | When true, never registers — only reports.    |
-| `API_DELAY_MS`  | `"1000"`                             | Delay between API calls (rate limiting).      |
-| `INWX_API_URL`  | `https://api.domrobot.com/jsonrpc/`  | Set to the OT&E URL to test against sandbox.   |
+| `DRY_RUN`          | `"true"`                             | When true, never registers — only reports.    |
+| `API_DELAY_MS`     | `"1000"`                             | Delay between API calls (rate limiting).      |
+| `INWX_API_URL`     | `https://api.domrobot.com/jsonrpc/`  | Set to the OT&E URL to test against sandbox.   |
+| `EXPIRY_ALERT_DAYS`| `"30,14,7,1"`                        | Days-before-expiry thresholds for alerts.     |
 
 Secrets (set with `wrangler secret put`): `INWX_USERNAME`, `INWX_PASSWORD`,
 `ADMIN_TOKEN`, and the optional `INWX_SHARED_SECRET`, `NOTIFY_WEBHOOK_URL`,
@@ -123,6 +129,10 @@ The table refreshes on each cron run and via the "WHOIS aktualisieren" button.
 | `GET /api/results.csv`    | Last run as CSV (same columns as the Python script).     |
 | `GET /api/whois`          | WHOIS/registration metadata per domain (last refresh).   |
 | `POST /api/whois/refresh` | Refresh WHOIS data now (`?async=true` for background).    |
+| `GET /api/history`        | Recent run history (capped list, newest first).          |
+
+`POST /api/run` and `POST /api/whois/refresh` return `409` if another run is
+already in progress (best-effort KV lock).
 
 ## Local development
 
