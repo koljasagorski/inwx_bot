@@ -11,8 +11,10 @@ Workers), and stores the domain list and results in **Workers KV**.
 - It logs in to INWX, checks each domain from the KV list with `domain.check`,
   and — unless `DRY_RUN` is on — registers free ones with `domain.create`.
 - Results are written to KV (`results:latest.json` and `results:latest.csv`).
+- It also refreshes **WHOIS/registration metadata** per domain (registered /
+  expires / last changed / status) and stores it in KV (`whois:latest.json`).
 - A **web dashboard** is served at `/` to view status, edit the domain list,
-  trigger a run, and download the CSV.
+  trigger a run, view the WHOIS table, and download the CSV.
 - Optional: a notification is POSTed to a Slack/Discord-compatible webhook when
   something noteworthy happens (a domain is available, bought, or a run fails).
 
@@ -86,9 +88,23 @@ enter your `ADMIN_TOKEN` once (kept in the browser's `sessionStorage`) to
 - see the last run's status and per-domain results,
 - edit and save the domain list,
 - trigger a check immediately ("Jetzt prüfen"),
+- view the **WHOIS / domain-status table** (registered / expires / last changed /
+  status per domain; expiry within 30 days is highlighted) and refresh it,
 - download the results as CSV.
 
 A strict Content-Security-Policy (nonce-based, no external assets) is applied.
+
+### WHOIS / domain status
+
+Registration metadata is gathered per domain from two sources:
+
+- **INWX `domain.info`** for domains in your own account — authoritative dates
+  (registered / expires / last changed) and status, works for every TLD.
+- **RDAP** (the JSON successor to WHOIS) for all other domains. Note that some
+  ccTLDs — notably **.de** (DENIC) — do not publish registration/expiry over
+  RDAP, so those columns may stay empty for domains you don't own.
+
+The table refreshes on each cron run and via the "WHOIS aktualisieren" button.
 
 ## HTTP endpoints
 
@@ -105,6 +121,8 @@ A strict Content-Security-Policy (nonce-based, no external assets) is applied.
 | `POST /api/run?async=true`| Start a run in the background, return `202` immediately. |
 | `GET /api/results.json`   | Full result of the last run.                             |
 | `GET /api/results.csv`    | Last run as CSV (same columns as the Python script).     |
+| `GET /api/whois`          | WHOIS/registration metadata per domain (last refresh).   |
+| `POST /api/whois/refresh` | Refresh WHOIS data now (`?async=true` for background).    |
 
 ## Local development
 

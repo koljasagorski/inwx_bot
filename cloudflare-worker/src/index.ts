@@ -12,6 +12,7 @@
  */
 import { dashboardPage } from "./dashboard";
 import { InwxClient, type AccountInfo } from "./inwx";
+import { lookupRdap, type WhoisInfo } from "./whois";
 
 export interface Env {
   INWX_BOT: KVNamespace;
@@ -45,10 +46,16 @@ interface RunRecord {
   error?: string;
 }
 
+interface WhoisRecord {
+  timestamp: string;
+  domains: WhoisInfo[];
+}
+
 const LIVE_API_URL = "https://api.domrobot.com/jsonrpc/";
 const DOMAINS_KEY = "domains";
 const RESULTS_JSON_KEY = "results:latest.json";
 const RESULTS_CSV_KEY = "results:latest.csv";
+const WHOIS_KEY = "whois:latest.json";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const isTrue = (value: string | undefined) => (value ?? "").trim().toLowerCase() === "true";
@@ -210,6 +217,86 @@ async function runAndStore(env: Env): Promise<RunRecord> {
   return record;
 }
 
+function inwxToWhois(domain: string, info: Record<string, unknown>): WhoisInfo {
+  const status = info.status;
+  const statusList = Array.isArray(status)
+    ? status.map(String)
+    : status
+      ? [String(status)]
+      : [];
+  return {
+    domain,
+    source: "inwx",
+    available: false,
+    status: statusList,
+    registered: (info.crDate as string) ?? null,
+    expires: (info.exDate as string) ?? null,
+    updated: (info.upDate as string) ?? null,
+    registrar: "INWX",
+  };
+}
+
+/** Prefer authoritative INWX data for owned domains; fall back to RDAP. */
+async function enrichDomain(client: InwxClient | null, domain: string): Promise<WhoisInfo> {
+  if (client) {
+    try {
+      const info = await client.getDomainInfo(domain);
+      if (info) return inwxToWhois(domain, info);
+    } catch {
+      // not owned / API hiccup -> fall back to RDAP
+    }
+  }
+  return lookupRdap(domain);
+}
+
+async function refreshWhois(env: Env): Promise<WhoisRecord> {
+  const timestamp = new Date().toISOString();
+  const delayMs = env.API_DELAY_MS ? Number(env.API_DELAY_MS) : 1000;
+  const domains = await loadDomains(env);
+
+  // Logging in is optional: without INWX credentials we still serve RDAP data.
+  let client: InwxClient | null = null;
+  let loggedIn = false;
+  if (env.INWX_USERNAME && env.INWX_PASSWORD) {
+    const c = new InwxClient(env.INWX_API_URL || LIVE_API_URL);
+    try {
+      await c.login(env.INWX_USERNAME, env.INWX_PASSWORD, env.INWX_SHARED_SECRET);
+      client = c;
+      loggedIn = true;
+    } catch {
+      client = null;
+    }
+  }
+
+  const results: WhoisInfo[] = [];
+  try {
+    for (let i = 0; i < domains.length; i++) {
+      if (i > 0 && delayMs > 0) await sleep(delayMs);
+      try {
+        results.push(await enrichDomain(client, domains[i]));
+      } catch (e) {
+        results.push({
+          domain: domains[i],
+          source: "none",
+          available: null,
+          status: [],
+          registered: null,
+          expires: null,
+          updated: null,
+          registrar: null,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+  } finally {
+    if (loggedIn && client) await client.logout().catch(() => {});
+  }
+
+  const record: WhoisRecord = { timestamp, domains: results };
+  await env.INWX_BOT.put(WHOIS_KEY, JSON.stringify(record, null, 2));
+  return record;
+}
+
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data, null, 2), {
     status,
@@ -250,8 +337,12 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
 
   // Public, low-detail status endpoint (no domain details leaked).
   if (request.method === "GET" && path === "/api/status") {
-    const raw = await env.INWX_BOT.get(RESULTS_JSON_KEY);
+    const [raw, whoisRaw] = await Promise.all([
+      env.INWX_BOT.get(RESULTS_JSON_KEY),
+      env.INWX_BOT.get(WHOIS_KEY),
+    ]);
     const last = raw ? (JSON.parse(raw) as RunRecord) : null;
+    const whois = whoisRaw ? (JSON.parse(whoisRaw) as WhoisRecord) : null;
     return json({
       ok: true,
       service: "inwx-bot worker",
@@ -260,6 +351,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       lastRun: last?.timestamp ?? null,
       lastRunDomains: last?.statuses.length ?? 0,
       lastRunError: last?.error ?? null,
+      whoisLastRun: whois?.timestamp ?? null,
     });
   }
 
@@ -298,12 +390,33 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     return json({ ok: !record.error, ...record });
   }
 
+  if (request.method === "GET" && path === "/api/whois") {
+    const raw = await env.INWX_BOT.get(WHOIS_KEY);
+    return new Response(raw ?? "{}", { headers: { "content-type": "application/json; charset=utf-8" } });
+  }
+
+  if (request.method === "POST" && path === "/api/whois/refresh") {
+    if (url.searchParams.get("async") === "true") {
+      ctx.waitUntil(refreshWhois(env).then(() => undefined));
+      return json({ ok: true, started: true }, 202);
+    }
+    const record = await refreshWhois(env);
+    return json({ ok: true, ...record });
+  }
+
   return json({ error: "not found" }, 404);
 }
 
 export default {
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(runAndStore(env).then(() => undefined));
+    // Run the availability check, then refresh WHOIS data (sequentially, so we
+    // never hold two INWX sessions at once).
+    ctx.waitUntil(
+      (async () => {
+        await runAndStore(env);
+        await refreshWhois(env);
+      })(),
+    );
   },
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     return handleFetch(request, env, ctx);

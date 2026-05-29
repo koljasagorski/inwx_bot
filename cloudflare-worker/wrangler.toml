@@ -8,11 +8,11 @@ compatibility_date = "2024-09-23"
 crons = ["0 6 * * *"]
 
 # KV namespace used for the domain list and the run results.
-# Create it once with:  wrangler kv namespace create INWX_BOT
-# then paste the returned id below.
+# Create your own with:  wrangler kv namespace create INWX_BOT
+# and replace the id below (the id is an identifier, not a secret).
 [[kv_namespaces]]
 binding = "INWX_BOT"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "4a136c11e00c4e02b19206117ff820f8"
 
 # Non-secret configuration. Secrets (credentials, tokens) are set with
 # `wrangler secret put` — see README.md.
