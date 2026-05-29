@@ -1,5 +1,13 @@
 This project is a bot for [INWX.de](https://github.com/inwx) that checks the availability of domains. If a domain is available, the bot automatically registers it through the INWX API.
 
+There are two ways to run it:
+
+- **CLI script** (this document): a Python script you run on demand or via cron.
+- **Cloudflare Worker** (serverless, scheduled): see
+  [`cloudflare-worker/`](cloudflare-worker/README.md). It runs on a Cron
+  Trigger, stores the domain list and results in Workers KV, and needs no
+  server of your own.
+
 ## install dependencies
 ```
 pip install -r requirements.txt

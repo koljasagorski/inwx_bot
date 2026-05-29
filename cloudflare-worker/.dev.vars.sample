@@ -1,0 +1,20 @@
+# Local development secrets for `wrangler dev`.
+# Copy this file to `.dev.vars` and fill it in. NEVER commit `.dev.vars`.
+# In production these are set with `wrangler secret put <NAME>` instead.
+
+INWX_USERNAME = "your-inwx-login"
+INWX_PASSWORD = "your-inwx-password"
+
+# Bearer token required by the HTTP endpoints (/domains, /run, /results.*).
+ADMIN_TOKEN = "choose-a-long-random-token"
+
+# Only needed if your INWX account uses 2FA / mobile TAN.
+# This is the base32 secret shown when you enable 2FA.
+# INWX_SHARED_SECRET = "BASE32SECRET"
+
+# Optional Slack/Discord-compatible webhook for run notifications.
+# NOTIFY_WEBHOOK_URL = "https://hooks.slack.com/services/..."
+
+# Optional default nameservers used on purchase.
+# INWX_NS1 = "ns.inwx.de"
+# INWX_NS2 = "ns2.inwx.de"
