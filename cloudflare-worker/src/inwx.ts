@@ -123,6 +123,16 @@ export class InwxClient {
     return (result.resData ?? {}) as AccountInfo;
   }
 
+  /**
+   * Fetch details for a domain in the account (registration / expiry / update
+   * dates, status, …). Returns null if the domain is not in this account.
+   */
+  async getDomainInfo(domain: string): Promise<Record<string, unknown> | null> {
+    const result = await this.rawCall("domain.info", { domain });
+    if (result.code === 1000) return (result.resData ?? {}) as Record<string, unknown>;
+    return null;
+  }
+
   /** Attempt to register a domain. Never throws; returns the API outcome. */
   async buyDomain(buyParams: Record<string, unknown>): Promise<{ success: boolean; code?: number; msg: string }> {
     const result = await this.rawCall("domain.create", buyParams);

@@ -48,6 +48,8 @@ th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;le
 .table-wrap{overflow-x:auto}
 .muted{color:var(--muted);font-size:13px}
 .error{color:var(--err);font-size:13px}
+.warn{color:#b45309;font-weight:600}
+.danger{color:var(--err);font-weight:600}
 .badge{display:inline-block;padding:3px 8px;border-radius:999px;font-size:12px;font-weight:600}
 .badge-skipped{background:var(--chip);color:var(--muted)}
 .badge-would_purchase{background:#dbeafe;color:#1e40af}
@@ -119,6 +121,23 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
       </div>
       <p id="results-empty" class="muted" hidden>Noch keine Ergebnisse. Starte eine Prüfung.</p>
     </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>WHOIS / Domain-Status</h2>
+        <div class="actions">
+          <span id="whois-time" class="muted"></span>
+          <button id="whois-refresh" class="btn">WHOIS aktualisieren</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="whois">
+          <thead><tr><th>Domain</th><th>Status</th><th>Registriert</th><th>Läuft ab</th><th>Zuletzt geändert</th><th>Registrar</th><th>Quelle</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="whois-empty" class="muted" hidden>Noch keine WHOIS-Daten. Klicke „WHOIS aktualisieren".</p>
+    </section>
   </div>
 </main>
 <footer>INWX Bot &middot; Cron-gesteuerter Domain-Check auf Cloudflare Workers</footer>
@@ -132,6 +151,8 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
   function clearNode(node) { while (node.firstChild) { node.removeChild(node.firstChild); } }
   function show(node, on) { node.hidden = !on; }
   function fmtTime(iso) { if (!iso) { return 'noch kein Lauf'; } var d = new Date(iso); return isNaN(d.getTime()) ? iso : d.toLocaleString(); }
+  function fmtDate(v) { if (!v) { return '–'; } var d = new Date(v); return isNaN(d.getTime()) ? String(v).slice(0, 10) : d.toLocaleDateString(); }
+  function daysUntil(v) { if (!v) { return null; } var d = new Date(v); if (isNaN(d.getTime())) { return null; } return Math.floor((d.getTime() - Date.now()) / 86400000); }
 
   function api(path, opts) {
     opts = opts || {};
@@ -240,8 +261,47 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
     });
   }
 
+  function renderWhois(rec) {
+    var tbody = el('whois').querySelector('tbody'); clearNode(tbody);
+    var list = (rec && rec.domains) || [];
+    show(el('whois-empty'), list.length === 0);
+    if (rec && rec.timestamp) { el('whois-time').textContent = 'Stand: ' + fmtTime(rec.timestamp); }
+    var i;
+    for (i = 0; i < list.length; i++) {
+      var w = list[i];
+      var tr = document.createElement('tr');
+      var cDomain = document.createElement('td'); cDomain.textContent = w.domain; tr.appendChild(cDomain);
+      var cStatus = document.createElement('td');
+      if (w.available === true) {
+        var b = document.createElement('span'); b.className = 'badge badge-would_purchase'; b.textContent = 'verfügbar'; cStatus.appendChild(b);
+      } else if (w.error) {
+        cStatus.textContent = w.error; cStatus.className = 'muted';
+      } else {
+        cStatus.textContent = (w.status && w.status.length) ? w.status.join(', ') : 'registriert';
+      }
+      tr.appendChild(cStatus);
+      var cReg = document.createElement('td'); cReg.textContent = fmtDate(w.registered); tr.appendChild(cReg);
+      var cExp = document.createElement('td'); cExp.textContent = fmtDate(w.expires);
+      var du = daysUntil(w.expires);
+      if (du !== null && du < 0) { cExp.className = 'danger'; }
+      else if (du !== null && du <= 30) { cExp.className = 'warn'; }
+      tr.appendChild(cExp);
+      var cUpd = document.createElement('td'); cUpd.textContent = fmtDate(w.updated); tr.appendChild(cUpd);
+      var cRar = document.createElement('td'); cRar.textContent = w.registrar || '–'; tr.appendChild(cRar);
+      var cSrc = document.createElement('td'); cSrc.textContent = w.source || '–'; cSrc.className = 'muted'; tr.appendChild(cSrc);
+      tbody.appendChild(tr);
+    }
+  }
+
+  function loadWhois() {
+    return api('/api/whois').then(function (r) {
+      if (r.status === 401) { throw { auth: true }; }
+      return r.json();
+    }).then(function (rec) { renderWhois(rec); });
+  }
+
   function loadAuthed() {
-    return Promise.all([loadDomains(), loadResults()]).then(function () {
+    return Promise.all([loadDomains(), loadResults(), loadWhois()]).then(function () {
       showApp(true);
     }).catch(function (e) {
       if (e && e.auth) {
@@ -305,6 +365,30 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       URL.revokeObjectURL(url);
     }).catch(function () {});
+  });
+
+  function pollWhois(before, attempt) {
+    if (attempt > 60) { el('whois-time').textContent = 'WHOIS-Abfrage läuft noch — bitte später aktualisieren.'; el('whois-refresh').disabled = false; return; }
+    setTimeout(function () {
+      api('/api/whois').then(function (r) { return r.json(); }).then(function (rec) {
+        var ts = (rec && rec.timestamp) ? rec.timestamp : null;
+        if (ts && ts !== before) {
+          renderWhois(rec); el('whois-refresh').disabled = false;
+        } else {
+          pollWhois(before, attempt + 1);
+        }
+      }).catch(function () { pollWhois(before, attempt + 1); });
+    }, 2500);
+  }
+
+  el('whois-refresh').addEventListener('click', function () {
+    var btn = this; btn.disabled = true;
+    var before = null;
+    api('/api/whois').then(function (r) { return r.json(); }).then(function (rec) { before = (rec && rec.timestamp) ? rec.timestamp : null; })
+      .then(function () { return api('/api/whois/refresh?async=true', { method: 'POST' }); })
+      .then(function (r) { if (r.status === 401) { throw { auth: true }; } return r.json(); })
+      .then(function () { el('whois-time').textContent = 'WHOIS-Abfrage läuft…'; pollWhois(before, 0); })
+      .catch(function (e) { el('whois-time').textContent = (e && e.auth) ? 'Nicht autorisiert.' : 'Fehler beim Start.'; btn.disabled = false; });
   });
 
   loadPublicStatus();
