@@ -24,6 +24,8 @@ export interface Env {
   INWX_NS2?: string;
   ADMIN_TOKEN?: string;
   NOTIFY_WEBHOOK_URL?: string;
+  TELEGRAM_BOT_TOKEN?: string;
+  TELEGRAM_CHAT_ID?: string;
   API_DELAY_MS?: string;
   DRY_RUN?: string;
   EXPIRY_ALERT_DAYS?: string;
@@ -261,6 +263,24 @@ async function sendWebhook(env: Env, text: string, extra: Record<string, unknown
   }
 }
 
+async function sendTelegram(env: Env, text: string): Promise<void> {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: env.TELEGRAM_CHAT_ID, text, disable_web_page_preview: true }),
+    });
+  } catch {
+    // Notifications are best-effort.
+  }
+}
+
+/** Fan out a notification to all configured channels (webhook + Telegram). */
+async function notify(env: Env, text: string, extra: Record<string, unknown> = {}): Promise<void> {
+  await Promise.all([sendWebhook(env, text, extra), sendTelegram(env, text)]);
+}
+
 function buyParamsFor(domain: string, accountInfo: AccountInfo, ns: string[]): Record<string, unknown> {
   const params: Record<string, unknown> = {
     domain,
@@ -390,13 +410,13 @@ const ACTION_LABELS_DE: Record<Action, string> = {
 };
 
 async function notifyRun(env: Env, record: RunRecord, changes: DomainChange[]): Promise<void> {
-  if (!env.NOTIFY_WEBHOOK_URL) return;
+  if (!env.NOTIFY_WEBHOOK_URL && !env.TELEGRAM_BOT_TOKEN) return;
 
   // De-duplicate fatal run errors so a persistent failure does not spam.
   if (record.error) {
     const meta = await readJson<{ lastNotifiedError?: string }>(env, META_KEY, {});
     if (meta.lastNotifiedError !== record.error) {
-      await sendWebhook(env, `INWX-Bot: Lauf fehlgeschlagen – ${record.error}`);
+      await notify(env, `INWX-Bot: Lauf fehlgeschlagen – ${record.error}`);
       await env.INWX_BOT.put(META_KEY, JSON.stringify({ ...meta, lastNotifiedError: record.error }));
     }
     return;
@@ -408,7 +428,7 @@ async function notifyRun(env: Env, record: RunRecord, changes: DomainChange[]): 
   if (changes.length === 0) return;
   const detail = changes.map((c) => `${c.domain}: ${ACTION_LABELS_DE[c.to]}`).join(", ");
   const prefix = record.dryRun ? "INWX-Bot (Probelauf)" : "INWX-Bot";
-  await sendWebhook(env, `${prefix}: ${changes.length} Änderung(en) – ${detail}`, { changes });
+  await notify(env, `${prefix}: ${changes.length} Änderung(en) – ${detail}`, { changes });
 }
 
 async function runAndStore(env: Env): Promise<RunRecord> {
@@ -552,14 +572,14 @@ async function processExpiryAlerts(env: Env, results: WhoisInfo[]): Promise<void
 
   await saveState(env, state);
   if (alerts.length > 0) {
-    await sendWebhook(env, `INWX-Bot: Ablauf-Warnung – ${alerts.join("; ")}`, { expiring: alerts });
+    await notify(env, `INWX-Bot: Ablauf-Warnung – ${alerts.join("; ")}`, { expiring: alerts });
   }
 }
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data, null, 2), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: { "content-type": "application/json; charset=utf-8", "x-content-type-options": "nosniff" },
   });
 }
 
@@ -587,9 +607,11 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       headers: {
         "content-type": "text/html; charset=utf-8",
         "content-security-policy":
-          `default-src 'none'; base-uri 'none'; form-action 'self'; connect-src 'self'; ` +
-          `img-src data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'`,
+          `default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; ` +
+          `connect-src 'self'; img-src data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'`,
         "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer",
       },
     });
   }
@@ -703,3 +725,15 @@ export default {
     return handleFetch(request, env, ctx);
   },
 } satisfies ExportedHandler<Env>;
+
+// Re-exported for unit tests (see test/).
+export {
+  normalizeConfig,
+  parseDomainConfigs,
+  toCsv,
+  countsOf,
+  detectRunChanges,
+  parseThresholds,
+  daysUntil,
+};
+export type { DomainConfig, DomainStatus, Action, StateMap };
