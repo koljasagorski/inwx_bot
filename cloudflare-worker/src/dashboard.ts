@@ -60,6 +60,9 @@ th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;le
 .badge-live{background:#dcfce7;color:#166534}
 footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);font-size:12px}
 .mt{margin-top:10px}
+.srow{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid var(--border)}
+.srow input[type=checkbox]{width:auto}
+.srow input[type=number],.srow input[type=text]{max-width:220px}
 [hidden]{display:none !important}
 </style>
 </head>
@@ -158,6 +161,46 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
         </table>
       </div>
       <p id="history-empty" class="muted" hidden>Noch kein Verlauf.</p>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>Schnell-Check</h2>
+        <span class="muted">prüft ohne zur Liste hinzuzufügen</span>
+      </div>
+      <div class="row">
+        <input id="check-input" type="text" placeholder="domain.de  –  oder Keyword" />
+        <input id="check-tlds" type="text" placeholder="TLDs für Keyword: de, com" />
+        <button id="check-btn" class="btn btn-primary">Prüfen</button>
+      </div>
+      <div class="table-wrap mt">
+        <table id="check-results">
+          <thead><tr><th>Domain</th><th>Verfügbar</th><th>Preis / Info</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="check-empty" class="muted" hidden>Domain – oder Keyword + TLDs – eingeben und „Prüfen".</p>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>Einstellungen</h2><span id="settings-msg" class="muted" hidden></span></div>
+      <div class="settings-form">
+        <label class="srow"><span>Probelauf (DRY_RUN) – kauft nichts</span><input id="set-dryrun" type="checkbox" /></label>
+        <label class="srow"><span>API-Delay (ms)</span><input id="set-delay" type="number" min="0" /></label>
+        <label class="srow"><span>Ablauf-Schwellen (Tage, kommagetrennt)</span><input id="set-thresholds" type="text" placeholder="30,14,7,1" /></label>
+      </div>
+      <div class="actions mt"><button id="save-settings" class="btn btn-primary">Einstellungen speichern</button></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>Audit-Log</h2><span class="muted">letzte Aktionen</span></div>
+      <div class="table-wrap">
+        <table id="audit">
+          <thead><tr><th>Zeitpunkt</th><th>Aktion</th><th>Detail</th><th>IP</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="audit-empty" class="muted" hidden>Noch keine Aktionen.</p>
     </section>
   </div>
 </main>
@@ -432,8 +475,58 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
     }).then(function (list) { renderHistory(list); });
   }
 
+  function renderCheckResults(list) {
+    var tbody = el('check-results').querySelector('tbody'); clearNode(tbody);
+    list = list || [];
+    show(el('check-empty'), list.length === 0);
+    var i;
+    for (i = 0; i < list.length; i++) {
+      var r = list[i];
+      var tr = document.createElement('tr');
+      addCell(tr, r.domain);
+      addCell(tr, r.error ? '–' : (r.available ? 'ja' : 'nein'), r.error ? 'muted' : '');
+      addCell(tr, (r.price !== undefined && r.price !== null) ? String(r.price) : (r.error || '–'), r.error ? 'muted' : '');
+      tbody.appendChild(tr);
+    }
+  }
+
+  function loadSettings() {
+    return api('/api/settings').then(function (r) {
+      if (r.status === 401) { throw { auth: true }; }
+      return r.json();
+    }).then(function (j) {
+      var s = (j && j.effective) || {};
+      el('set-dryrun').checked = !!s.dryRun;
+      el('set-delay').value = (s.apiDelayMs !== undefined && s.apiDelayMs !== null) ? s.apiDelayMs : '';
+      el('set-thresholds').value = (s.expiryAlertDays || []).join(',');
+    });
+  }
+
+  function renderAudit(list) {
+    var tbody = el('audit').querySelector('tbody'); clearNode(tbody);
+    list = list || [];
+    show(el('audit-empty'), list.length === 0);
+    var i;
+    for (i = 0; i < list.length; i++) {
+      var a = list[i];
+      var tr = document.createElement('tr');
+      addCell(tr, fmtTime(a.timestamp));
+      addCell(tr, a.action || '');
+      addCell(tr, a.detail || '');
+      addCell(tr, a.ip || '–');
+      tbody.appendChild(tr);
+    }
+  }
+
+  function loadAudit() {
+    return api('/api/audit').then(function (r) {
+      if (r.status === 401) { throw { auth: true }; }
+      return r.json();
+    }).then(function (list) { renderAudit(list); });
+  }
+
   function loadAuthed() {
-    return Promise.all([loadDomains(), loadResults(), loadWhois(), loadHistory()]).then(function () {
+    return Promise.all([loadDomains(), loadResults(), loadWhois(), loadHistory(), loadSettings(), loadAudit()]).then(function () {
       showApp(true);
     }).catch(function (e) {
       if (e && e.auth) {
@@ -523,6 +616,38 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
       .then(function (r) { if (r.status === 401) { throw { auth: true }; } return r.json(); })
       .then(function () { el('whois-time').textContent = 'WHOIS-Abfrage läuft…'; pollWhois(before, 0); })
       .catch(function (e) { el('whois-time').textContent = (e && e.auth) ? 'Nicht autorisiert.' : 'Fehler beim Start.'; btn.disabled = false; });
+  });
+
+  el('check-btn').addEventListener('click', function () {
+    var input = el('check-input').value.trim();
+    var tldsRaw = el('check-tlds').value.trim();
+    if (!input) { return; }
+    var body = tldsRaw
+      ? { keyword: input, tlds: tldsRaw.split(',').map(function (t) { return t.trim(); }).filter(Boolean) }
+      : { domain: input };
+    var btn = this; btn.disabled = true; btn.textContent = 'Prüfe…';
+    api('/api/check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      .then(function (r) { if (r.status === 401) { throw { auth: true }; } return r.json(); })
+      .then(function (j) { renderCheckResults((j && j.results) || []); if (j && j.ok === false && j.error) { window.alert(j.error); } })
+      .catch(function (e) { window.alert((e && e.auth) ? 'Nicht autorisiert.' : 'Fehler beim Check.'); })
+      .then(function () { btn.disabled = false; btn.textContent = 'Prüfen'; });
+  });
+
+  el('save-settings').addEventListener('click', function () {
+    var dryRun = el('set-dryrun').checked;
+    if (!dryRun && !window.confirm('DRY_RUN ausschalten? Der Bot registriert dann verfügbare auto-Domains WIRKLICH (kostenpflichtig).')) { return; }
+    var override = { dryRun: dryRun };
+    var delay = el('set-delay').value.trim();
+    if (delay !== '') { var d = Number(delay); if (!isNaN(d)) { override.apiDelayMs = d; } }
+    var th = el('set-thresholds').value.trim();
+    if (th !== '') { override.expiryAlertDays = th.split(',').map(function (x) { return Number(x.trim()); }).filter(function (n) { return !isNaN(n); }); }
+    var btn = this; btn.disabled = true;
+    var msg = el('settings-msg'); show(msg, true); msg.textContent = 'Speichere…';
+    api('/api/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(override) })
+      .then(function (r) { if (r.status === 401) { throw { auth: true }; } return r.json(); })
+      .then(function () { msg.textContent = 'Gespeichert.'; loadPublicStatus(); loadAudit(); })
+      .catch(function (e) { msg.textContent = (e && e.auth) ? 'Nicht autorisiert.' : 'Fehler.'; })
+      .then(function () { btn.disabled = false; });
   });
 
   loadPublicStatus();

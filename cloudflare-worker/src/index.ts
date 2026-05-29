@@ -102,9 +102,36 @@ const META_KEY = "state:meta";
 const LOCK_KEY = "lock:run";
 const HISTORY_LIMIT = 50;
 const DEFAULT_EXPIRY_ALERT_DAYS = [30, 14, 7, 1];
+const SETTINGS_KEY = "settings:config";
+const AUDIT_KEY = "audit:log";
+const AUDIT_LIMIT = 100;
+const THROTTLE_PREFIX = "throttle:";
+const THROTTLE_MAX = 10;
+const THROTTLE_WINDOW_SECONDS = 300;
 
 /** Actions that are worth a notification when a domain first reaches them. */
 const INTERESTING_ACTIONS: Action[] = ["would_purchase", "purchased", "purchase_failed", "error"];
+
+/** Effective runtime settings (env defaults, possibly overridden via KV). */
+interface Settings {
+  dryRun: boolean;
+  apiDelayMs: number;
+  expiryAlertDays: number[];
+}
+
+/** Partial overrides stored in KV via the dashboard settings panel. */
+interface SettingsOverride {
+  dryRun?: boolean;
+  apiDelayMs?: number;
+  expiryAlertDays?: number[];
+}
+
+interface AuditEntry {
+  timestamp: string;
+  action: string;
+  detail?: string;
+  ip?: string;
+}
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const isTrue = (value: string | undefined) => (value ?? "").trim().toLowerCase() === "true";
@@ -191,6 +218,73 @@ async function readJson<T>(env: Env, key: string, fallback: T): Promise<T> {
 
 const loadState = (env: Env) => readJson<StateMap>(env, STATE_KEY, {});
 const saveState = (env: Env, state: StateMap) => env.INWX_BOT.put(STATE_KEY, JSON.stringify(state));
+
+/** Settings from env (the safe defaults), overlaid with KV overrides. */
+function envSettings(env: Env): Settings {
+  return {
+    dryRun: isTrue(env.DRY_RUN),
+    apiDelayMs: env.API_DELAY_MS ? Number(env.API_DELAY_MS) : 1000,
+    expiryAlertDays: parseThresholds(env.EXPIRY_ALERT_DAYS),
+  };
+}
+
+function mergeSettings(base: Settings, ov: SettingsOverride): Settings {
+  return {
+    dryRun: typeof ov.dryRun === "boolean" ? ov.dryRun : base.dryRun,
+    apiDelayMs:
+      typeof ov.apiDelayMs === "number" && Number.isFinite(ov.apiDelayMs) && ov.apiDelayMs >= 0
+        ? ov.apiDelayMs
+        : base.apiDelayMs,
+    expiryAlertDays:
+      Array.isArray(ov.expiryAlertDays) && ov.expiryAlertDays.length > 0
+        ? ov.expiryAlertDays.filter((n) => Number.isFinite(n) && n >= 0).sort((a, b) => b - a)
+        : base.expiryAlertDays,
+  };
+}
+
+async function loadSettings(env: Env): Promise<Settings> {
+  return mergeSettings(envSettings(env), await readJson<SettingsOverride>(env, SETTINGS_KEY, {}));
+}
+
+async function audit(env: Env, request: Request, action: string, detail?: string): Promise<void> {
+  const entry: AuditEntry = {
+    timestamp: new Date().toISOString(),
+    action,
+    detail,
+    ip: request.headers.get("cf-connecting-ip") ?? undefined,
+  };
+  const log = await readJson<AuditEntry[]>(env, AUDIT_KEY, []);
+  log.unshift(entry);
+  await env.INWX_BOT.put(AUDIT_KEY, JSON.stringify(log.slice(0, AUDIT_LIMIT)));
+}
+
+// Brute-force protection on the admin token, keyed by client IP. Fail-open:
+// any KV hiccup leaves the request allowed rather than locking the user out.
+async function isThrottled(env: Env, ip: string | null): Promise<boolean> {
+  if (!ip) return false;
+  const n = Number(await env.INWX_BOT.get(THROTTLE_PREFIX + ip)) || 0;
+  return n >= THROTTLE_MAX;
+}
+
+async function recordAuthFailure(env: Env, ip: string | null): Promise<void> {
+  if (!ip) return;
+  const n = (Number(await env.INWX_BOT.get(THROTTLE_PREFIX + ip)) || 0) + 1;
+  await env.INWX_BOT.put(THROTTLE_PREFIX + ip, String(n), { expirationTtl: THROTTLE_WINDOW_SECONDS });
+}
+
+const clearAuthFailures = (env: Env, ip: string | null) =>
+  ip ? env.INWX_BOT.delete(THROTTLE_PREFIX + ip) : Promise.resolve();
+
+/** Expand an ad-hoc check request into concrete domains to query. */
+function expandCheckTargets(input: { domain?: string; keyword?: string; tlds?: string[] }): string[] {
+  if (typeof input.domain === "string" && input.domain.trim()) {
+    return [input.domain.trim().toLowerCase()];
+  }
+  const keyword = (input.keyword ?? "").trim().toLowerCase().replace(/[^a-z0-9-]/g, "");
+  const tlds = (input.tlds ?? []).map((t) => String(t).trim().replace(/^\./, "").toLowerCase()).filter(Boolean);
+  if (!keyword || tlds.length === 0) return [];
+  return tlds.map((tld) => `${keyword}.${tld}`);
+}
 
 async function appendHistory(env: Env, summary: RunSummary): Promise<void> {
   const history = await readJson<RunSummary[]>(env, HISTORY_KEY, []);
@@ -330,12 +424,12 @@ async function processDomain(
   return { domain, available: true, action: "purchase_failed", detail: `Code ${code}: ${msg}`, api_code: code ?? null, api_msg: msg };
 }
 
-async function runCheck(env: Env): Promise<DomainStatus[]> {
+async function runCheck(env: Env, settings: Settings): Promise<DomainStatus[]> {
   if (!env.INWX_USERNAME || !env.INWX_PASSWORD) {
     throw new Error("INWX_USERNAME or INWX_PASSWORD is not configured");
   }
-  const dryRun = isTrue(env.DRY_RUN);
-  const delayMs = env.API_DELAY_MS ? Number(env.API_DELAY_MS) : 1000;
+  const dryRun = settings.dryRun;
+  const delayMs = settings.apiDelayMs;
   const client = new InwxClient(env.INWX_API_URL || LIVE_API_URL);
   const statuses: DomainStatus[] = [];
 
@@ -401,6 +495,40 @@ async function buyDomainNow(
   }
 }
 
+interface CheckResult {
+  domain: string;
+  available?: boolean;
+  price?: number | null;
+  error?: string;
+}
+
+/** Ad-hoc availability/price check for arbitrary domains (does not buy). */
+async function runAdhocCheck(env: Env, targets: string[]): Promise<CheckResult[]> {
+  if (!env.INWX_USERNAME || !env.INWX_PASSWORD) {
+    throw new Error("INWX credentials not configured");
+  }
+  const settings = await loadSettings(env);
+  const client = new InwxClient(env.INWX_API_URL || LIVE_API_URL);
+  const out: CheckResult[] = [];
+  let loggedIn = false;
+  try {
+    await client.login(env.INWX_USERNAME, env.INWX_PASSWORD, env.INWX_SHARED_SECRET);
+    loggedIn = true;
+    for (let i = 0; i < targets.length; i++) {
+      if (i > 0 && settings.apiDelayMs > 0) await sleep(settings.apiDelayMs);
+      try {
+        const { avail, price } = await client.checkDomain(targets[i]);
+        out.push({ domain: targets[i], available: avail, price });
+      } catch (e) {
+        out.push({ domain: targets[i], error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+  } finally {
+    if (loggedIn) await client.logout().catch(() => {});
+  }
+  return out;
+}
+
 const ACTION_LABELS_DE: Record<Action, string> = {
   skipped: "übersprungen",
   would_purchase: "verfügbar",
@@ -433,10 +561,11 @@ async function notifyRun(env: Env, record: RunRecord, changes: DomainChange[]): 
 
 async function runAndStore(env: Env): Promise<RunRecord> {
   const timestamp = new Date().toISOString();
-  const dryRun = isTrue(env.DRY_RUN);
+  const settings = await loadSettings(env);
+  const dryRun = settings.dryRun;
   let record: RunRecord;
   try {
-    record = { timestamp, dryRun, statuses: await runCheck(env) };
+    record = { timestamp, dryRun, statuses: await runCheck(env, settings) };
   } catch (e) {
     record = { timestamp, dryRun, statuses: [], error: e instanceof Error ? e.message : String(e) };
   }
@@ -498,7 +627,8 @@ async function enrichDomain(client: InwxClient | null, domain: string): Promise<
 
 async function refreshWhois(env: Env): Promise<WhoisRecord> {
   const timestamp = new Date().toISOString();
-  const delayMs = env.API_DELAY_MS ? Number(env.API_DELAY_MS) : 1000;
+  const settings = await loadSettings(env);
+  const delayMs = settings.apiDelayMs;
   const domains = await loadDomains(env);
 
   // Logging in is optional: without INWX credentials we still serve RDAP data.
@@ -541,13 +671,12 @@ async function refreshWhois(env: Env): Promise<WhoisRecord> {
 
   const record: WhoisRecord = { timestamp, domains: results };
   await env.INWX_BOT.put(WHOIS_KEY, JSON.stringify(record, null, 2));
-  await processExpiryAlerts(env, results);
+  await processExpiryAlerts(env, results, settings.expiryAlertDays);
   return record;
 }
 
 /** Notify once per crossed threshold as an owned/registered domain nears expiry. */
-async function processExpiryAlerts(env: Env, results: WhoisInfo[]): Promise<void> {
-  const thresholds = parseThresholds(env.EXPIRY_ALERT_DAYS);
+async function processExpiryAlerts(env: Env, results: WhoisInfo[], thresholds: number[]): Promise<void> {
   const state = await loadState(env);
   const alerts: string[] = [];
 
@@ -618,16 +747,17 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
 
   // Public, low-detail status endpoint (no domain details leaked).
   if (request.method === "GET" && path === "/api/status") {
-    const [raw, whoisRaw] = await Promise.all([
+    const [raw, whoisRaw, settings] = await Promise.all([
       env.INWX_BOT.get(RESULTS_JSON_KEY),
       env.INWX_BOT.get(WHOIS_KEY),
+      loadSettings(env),
     ]);
     const last = raw ? (JSON.parse(raw) as RunRecord) : null;
     const whois = whoisRaw ? (JSON.parse(whoisRaw) as WhoisRecord) : null;
     return json({
       ok: true,
       service: "inwx-bot worker",
-      dryRun: isTrue(env.DRY_RUN),
+      dryRun: settings.dryRun,
       authConfigured: Boolean(env.ADMIN_TOKEN),
       lastRun: last?.timestamp ?? null,
       lastRunDomains: last?.statuses.length ?? 0,
@@ -636,8 +766,17 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     });
   }
 
-  // Everything below requires the admin bearer token.
-  if (!isAuthorized(request, env)) return unauthorized();
+  // Everything below requires the admin bearer token, with per-IP throttling
+  // to slow down brute-force attempts.
+  const ip = request.headers.get("cf-connecting-ip");
+  if (await isThrottled(env, ip)) {
+    return json({ error: "too many failed attempts – try again later" }, 429);
+  }
+  if (!isAuthorized(request, env)) {
+    await recordAuthFailure(env, ip);
+    return unauthorized();
+  }
+  await clearAuthFailures(env, ip);
 
   if (request.method === "GET" && path === "/api/results.csv") {
     const csv = (await env.INWX_BOT.get(RESULTS_CSV_KEY)) ?? "";
@@ -656,11 +795,13 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     if (request.method === "PUT" || request.method === "POST") {
       const domains = parseDomainConfigs(await request.text());
       await env.INWX_BOT.put(DOMAINS_KEY, JSON.stringify(domains));
+      await audit(env, request, "domains.save", `${domains.length} domains`);
       return json({ ok: true, count: domains.length, domains });
     }
   }
 
   if (request.method === "POST" && path === "/api/run") {
+    await audit(env, request, "run", url.searchParams.get("async") === "true" ? "async" : "sync");
     // `?async=true` returns immediately and runs in the background; otherwise
     // the run completes inline (suitable for small lists / manual triggers).
     if (url.searchParams.get("async") === "true") {
@@ -681,6 +822,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     }
     const domain = (body.domain ?? "").trim();
     if (!domain) return json({ ok: false, error: "domain required" }, 400);
+    await audit(env, request, "buy", domain);
     const outcome = await withLock(env, () => buyDomainNow(env, domain));
     if (outcome.skipped) return json({ ok: false, error: "a run is already in progress" }, 409);
     return json({ domain, ...outcome.result });
@@ -692,6 +834,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
   }
 
   if (request.method === "POST" && path === "/api/whois/refresh") {
+    await audit(env, request, "whois.refresh");
     if (url.searchParams.get("async") === "true") {
       ctx.waitUntil(withLock(env, () => refreshWhois(env)).then(() => undefined));
       return json({ ok: true, started: true }, 202);
@@ -704,6 +847,65 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
   if (request.method === "GET" && path === "/api/history") {
     const raw = await env.INWX_BOT.get(HISTORY_KEY);
     return new Response(raw ?? "[]", { headers: { "content-type": "application/json; charset=utf-8" } });
+  }
+
+  if (path === "/api/settings") {
+    if (request.method === "GET") {
+      const [effective, override] = await Promise.all([
+        loadSettings(env),
+        readJson<SettingsOverride>(env, SETTINGS_KEY, {}),
+      ]);
+      return json({ effective, override });
+    }
+    if (request.method === "PUT" || request.method === "POST") {
+      let body: SettingsOverride = {};
+      try {
+        body = (await request.json()) as SettingsOverride;
+      } catch {
+        // ignore malformed body
+      }
+      const override: SettingsOverride = {};
+      if (typeof body.dryRun === "boolean") override.dryRun = body.dryRun;
+      if (typeof body.apiDelayMs === "number" && Number.isFinite(body.apiDelayMs) && body.apiDelayMs >= 0) {
+        override.apiDelayMs = body.apiDelayMs;
+      }
+      if (Array.isArray(body.expiryAlertDays)) {
+        const days = body.expiryAlertDays.map(Number).filter((n) => Number.isFinite(n) && n >= 0);
+        if (days.length > 0) override.expiryAlertDays = days;
+      }
+      await env.INWX_BOT.put(SETTINGS_KEY, JSON.stringify(override));
+      await audit(env, request, "settings.save", JSON.stringify(override));
+      return json({ ok: true, override, effective: await loadSettings(env) });
+    }
+  }
+
+  if (request.method === "POST" && path === "/api/check") {
+    let body: { domain?: string; keyword?: string; tlds?: string[] } = {};
+    try {
+      body = (await request.json()) as { domain?: string; keyword?: string; tlds?: string[] };
+    } catch {
+      // ignore malformed body
+    }
+    const targets = expandCheckTargets(body);
+    if (targets.length === 0) return json({ ok: false, error: "provide a domain, or a keyword + tlds" }, 400);
+    if (!env.INWX_USERNAME || !env.INWX_PASSWORD) {
+      return json({ ok: false, error: "INWX credentials not configured" });
+    }
+    await audit(env, request, "check", targets.join(","));
+    try {
+      const outcome = await withLock(env, () => runAdhocCheck(env, targets));
+      if (outcome.skipped) return json({ ok: false, error: "a run is already in progress" }, 409);
+      return json({ ok: true, results: outcome.result });
+    } catch (e) {
+      return json({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  if (request.method === "GET" && path === "/api/audit") {
+    const raw = await env.INWX_BOT.get(AUDIT_KEY);
+    return new Response(raw ?? "[]", {
+      headers: { "content-type": "application/json; charset=utf-8", "x-content-type-options": "nosniff" },
+    });
   }
 
   return json({ error: "not found" }, 404);
@@ -735,5 +937,7 @@ export {
   detectRunChanges,
   parseThresholds,
   daysUntil,
+  mergeSettings,
+  expandCheckTargets,
 };
-export type { DomainConfig, DomainStatus, Action, StateMap };
+export type { DomainConfig, DomainStatus, Action, StateMap, Settings, SettingsOverride };
