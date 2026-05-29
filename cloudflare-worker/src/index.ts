@@ -26,6 +26,7 @@ export interface Env {
   NOTIFY_WEBHOOK_URL?: string;
   API_DELAY_MS?: string;
   DRY_RUN?: string;
+  EXPIRY_ALERT_DAYS?: string;
 }
 
 type Action = "skipped" | "purchased" | "purchase_failed" | "would_purchase" | "error";
@@ -51,11 +52,45 @@ interface WhoisRecord {
   domains: WhoisInfo[];
 }
 
+interface RunSummary {
+  timestamp: string;
+  dryRun: boolean;
+  total: number;
+  counts: Record<string, number>;
+  error?: string;
+}
+
+interface DomainChange {
+  domain: string;
+  from: Action | "new";
+  to: Action;
+}
+
+interface DomainState {
+  action?: Action;
+  available?: boolean | null;
+  /** Expiry the alert thresholds below refer to (reset when it changes). */
+  expires?: string | null;
+  /** Expiry-alert thresholds (in days) already sent for the current expiry. */
+  notifiedExpiryDays?: number[];
+}
+
+type StateMap = Record<string, DomainState>;
+
 const LIVE_API_URL = "https://api.domrobot.com/jsonrpc/";
 const DOMAINS_KEY = "domains";
 const RESULTS_JSON_KEY = "results:latest.json";
 const RESULTS_CSV_KEY = "results:latest.csv";
 const WHOIS_KEY = "whois:latest.json";
+const HISTORY_KEY = "history:runs";
+const STATE_KEY = "state:domains";
+const META_KEY = "state:meta";
+const LOCK_KEY = "lock:run";
+const HISTORY_LIMIT = 50;
+const DEFAULT_EXPIRY_ALERT_DAYS = [30, 14, 7, 1];
+
+/** Actions that are worth a notification when a domain first reaches them. */
+const INTERESTING_ACTIONS: Action[] = ["would_purchase", "purchased", "purchase_failed", "error"];
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const isTrue = (value: string | undefined) => (value ?? "").trim().toLowerCase() === "true";
@@ -94,6 +129,96 @@ function toCsv(statuses: DomainStatus[]): string {
     lines.push(fields.map((f) => escape(status[f])).join(","));
   }
   return lines.join("\n");
+}
+
+function countsOf(statuses: DomainStatus[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const s of statuses) counts[s.action] = (counts[s.action] ?? 0) + 1;
+  return counts;
+}
+
+async function readJson<T>(env: Env, key: string, fallback: T): Promise<T> {
+  const raw = await env.INWX_BOT.get(key);
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+const loadState = (env: Env) => readJson<StateMap>(env, STATE_KEY, {});
+const saveState = (env: Env, state: StateMap) => env.INWX_BOT.put(STATE_KEY, JSON.stringify(state));
+
+async function appendHistory(env: Env, summary: RunSummary): Promise<void> {
+  const history = await readJson<RunSummary[]>(env, HISTORY_KEY, []);
+  history.unshift(summary);
+  await env.INWX_BOT.put(HISTORY_KEY, JSON.stringify(history.slice(0, HISTORY_LIMIT)));
+}
+
+// Best-effort mutual exclusion. KV is eventually consistent, so this only
+// guards against the common case (an overlapping manual + scheduled run); it is
+// not a hard lock.
+async function acquireLock(env: Env, token: string, ttlSeconds = 600): Promise<boolean> {
+  if (await env.INWX_BOT.get(LOCK_KEY)) return false;
+  await env.INWX_BOT.put(LOCK_KEY, token, { expirationTtl: ttlSeconds });
+  return true;
+}
+
+async function releaseLock(env: Env, token: string): Promise<void> {
+  if ((await env.INWX_BOT.get(LOCK_KEY)) === token) await env.INWX_BOT.delete(LOCK_KEY);
+}
+
+async function withLock<T>(env: Env, fn: () => Promise<T>): Promise<{ skipped: true } | { skipped: false; result: T }> {
+  const token = crypto.randomUUID();
+  if (!(await acquireLock(env, token))) return { skipped: true };
+  try {
+    return { skipped: false, result: await fn() };
+  } finally {
+    await releaseLock(env, token);
+  }
+}
+
+/** Domains whose action changed into an "interesting" state since last run. */
+function detectRunChanges(prev: StateMap, statuses: DomainStatus[]): DomainChange[] {
+  const changes: DomainChange[] = [];
+  for (const s of statuses) {
+    const before = prev[s.domain]?.action;
+    if (s.action !== before && INTERESTING_ACTIONS.includes(s.action)) {
+      changes.push({ domain: s.domain, from: before ?? "new", to: s.action });
+    }
+  }
+  return changes;
+}
+
+function parseThresholds(raw: string | undefined): number[] {
+  if (!raw) return DEFAULT_EXPIRY_ALERT_DAYS;
+  const parsed = raw
+    .split(",")
+    .map((p) => Number(p.trim()))
+    .filter((n) => Number.isFinite(n) && n >= 0);
+  return parsed.length > 0 ? parsed.sort((a, b) => b - a) : DEFAULT_EXPIRY_ALERT_DAYS;
+}
+
+function daysUntil(dateStr: string | null): number | null {
+  if (!dateStr) return null;
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return null;
+  return Math.floor((d.getTime() - Date.now()) / 86_400_000);
+}
+
+async function sendWebhook(env: Env, text: string, extra: Record<string, unknown> = {}): Promise<void> {
+  if (!env.NOTIFY_WEBHOOK_URL) return;
+  try {
+    await fetch(env.NOTIFY_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // `text` suits Slack, `content` suits Discord — sending both is harmless.
+      body: JSON.stringify({ text, content: text, ...extra }),
+    });
+  } catch {
+    // Notifications are best-effort.
+  }
 }
 
 async function processDomain(
@@ -173,33 +298,34 @@ async function runCheck(env: Env): Promise<DomainStatus[]> {
   return statuses;
 }
 
-function summarize(record: RunRecord): string {
-  if (record.error) return `INWX-Bot: Lauf fehlgeschlagen – ${record.error}`;
-  const counts: Record<string, number> = {};
-  for (const s of record.statuses) counts[s.action] = (counts[s.action] ?? 0) + 1;
-  const parts = Object.entries(counts).map(([k, v]) => `${k}: ${v}`);
-  const prefix = record.dryRun ? "INWX-Bot (Probelauf)" : "INWX-Bot";
-  return `${prefix}: ${record.statuses.length} Domains geprüft – ${parts.join(", ") || "keine"}`;
-}
+const ACTION_LABELS_DE: Record<Action, string> = {
+  skipped: "übersprungen",
+  would_purchase: "verfügbar",
+  purchased: "gekauft",
+  purchase_failed: "Kauf fehlgeschlagen",
+  error: "Fehler",
+};
 
-async function notify(env: Env, record: RunRecord): Promise<void> {
+async function notifyRun(env: Env, record: RunRecord, changes: DomainChange[]): Promise<void> {
   if (!env.NOTIFY_WEBHOOK_URL) return;
-  // Only ping when something is worth knowing (available / bought / failed / errored).
-  const noteworthy = Boolean(record.error) || record.statuses.some((s) => s.action !== "skipped");
-  if (!noteworthy) return;
 
-  const text = summarize(record);
-  const interesting = record.statuses.filter((s) => s.action !== "skipped");
-  try {
-    await fetch(env.NOTIFY_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      // `text` suits Slack, `content` suits Discord — sending both is harmless.
-      body: JSON.stringify({ text, content: text, statuses: interesting }),
-    });
-  } catch {
-    // Notifications are best-effort.
+  // De-duplicate fatal run errors so a persistent failure does not spam.
+  if (record.error) {
+    const meta = await readJson<{ lastNotifiedError?: string }>(env, META_KEY, {});
+    if (meta.lastNotifiedError !== record.error) {
+      await sendWebhook(env, `INWX-Bot: Lauf fehlgeschlagen – ${record.error}`);
+      await env.INWX_BOT.put(META_KEY, JSON.stringify({ ...meta, lastNotifiedError: record.error }));
+    }
+    return;
   }
+  // Clear a stored error once a run succeeds again.
+  await env.INWX_BOT.put(META_KEY, JSON.stringify({}));
+
+  // Only notify when a domain's status actually changed since the last run.
+  if (changes.length === 0) return;
+  const detail = changes.map((c) => `${c.domain}: ${ACTION_LABELS_DE[c.to]}`).join(", ");
+  const prefix = record.dryRun ? "INWX-Bot (Probelauf)" : "INWX-Bot";
+  await sendWebhook(env, `${prefix}: ${changes.length} Änderung(en) – ${detail}`, { changes });
 }
 
 async function runAndStore(env: Env): Promise<RunRecord> {
@@ -211,9 +337,27 @@ async function runAndStore(env: Env): Promise<RunRecord> {
   } catch (e) {
     record = { timestamp, dryRun, statuses: [], error: e instanceof Error ? e.message : String(e) };
   }
+
   await env.INWX_BOT.put(RESULTS_JSON_KEY, JSON.stringify(record, null, 2));
   await env.INWX_BOT.put(RESULTS_CSV_KEY, toCsv(record.statuses));
-  await notify(env, record);
+
+  // Detect per-domain changes vs. the previous run, then persist the new state.
+  const state = await loadState(env);
+  const changes = detectRunChanges(state, record.statuses);
+  for (const s of record.statuses) {
+    state[s.domain] = { ...state[s.domain], action: s.action, available: s.available };
+  }
+  await saveState(env, state);
+
+  await appendHistory(env, {
+    timestamp,
+    dryRun,
+    total: record.statuses.length,
+    counts: countsOf(record.statuses),
+    error: record.error,
+  });
+
+  await notifyRun(env, record, changes);
   return record;
 }
 
@@ -294,7 +438,39 @@ async function refreshWhois(env: Env): Promise<WhoisRecord> {
 
   const record: WhoisRecord = { timestamp, domains: results };
   await env.INWX_BOT.put(WHOIS_KEY, JSON.stringify(record, null, 2));
+  await processExpiryAlerts(env, results);
   return record;
+}
+
+/** Notify once per crossed threshold as an owned/registered domain nears expiry. */
+async function processExpiryAlerts(env: Env, results: WhoisInfo[]): Promise<void> {
+  const thresholds = parseThresholds(env.EXPIRY_ALERT_DAYS);
+  const state = await loadState(env);
+  const alerts: string[] = [];
+
+  for (const w of results) {
+    const st: DomainState = state[w.domain] ?? {};
+    // Reset the notified thresholds if the expiry date changed (e.g. renewed).
+    if (st.expires !== (w.expires ?? null)) {
+      st.expires = w.expires ?? null;
+      st.notifiedExpiryDays = [];
+    }
+    const left = daysUntil(w.expires);
+    if (left !== null && left >= 0) {
+      const notified = st.notifiedExpiryDays ?? [];
+      const crossed = thresholds.filter((t) => left <= t && !notified.includes(t));
+      if (crossed.length > 0) {
+        alerts.push(`${w.domain}: läuft in ${left} Tag(en) ab (${(w.expires ?? "").slice(0, 10)})`);
+        st.notifiedExpiryDays = [...notified, ...crossed];
+      }
+    }
+    state[w.domain] = st;
+  }
+
+  await saveState(env, state);
+  if (alerts.length > 0) {
+    await sendWebhook(env, `INWX-Bot: Ablauf-Warnung – ${alerts.join("; ")}`, { expiring: alerts });
+  }
 }
 
 function json(data: unknown, status = 200): Response {
@@ -383,11 +559,12 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     // `?async=true` returns immediately and runs in the background; otherwise
     // the run completes inline (suitable for small lists / manual triggers).
     if (url.searchParams.get("async") === "true") {
-      ctx.waitUntil(runAndStore(env).then(() => undefined));
+      ctx.waitUntil(withLock(env, () => runAndStore(env)).then(() => undefined));
       return json({ ok: true, started: true }, 202);
     }
-    const record = await runAndStore(env);
-    return json({ ok: !record.error, ...record });
+    const outcome = await withLock(env, () => runAndStore(env));
+    if (outcome.skipped) return json({ ok: false, error: "a run is already in progress" }, 409);
+    return json({ ok: !outcome.result.error, ...outcome.result });
   }
 
   if (request.method === "GET" && path === "/api/whois") {
@@ -397,11 +574,17 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
 
   if (request.method === "POST" && path === "/api/whois/refresh") {
     if (url.searchParams.get("async") === "true") {
-      ctx.waitUntil(refreshWhois(env).then(() => undefined));
+      ctx.waitUntil(withLock(env, () => refreshWhois(env)).then(() => undefined));
       return json({ ok: true, started: true }, 202);
     }
-    const record = await refreshWhois(env);
-    return json({ ok: true, ...record });
+    const outcome = await withLock(env, () => refreshWhois(env));
+    if (outcome.skipped) return json({ ok: false, error: "a refresh is already in progress" }, 409);
+    return json({ ok: true, ...outcome.result });
+  }
+
+  if (request.method === "GET" && path === "/api/history") {
+    const raw = await env.INWX_BOT.get(HISTORY_KEY);
+    return new Response(raw ?? "[]", { headers: { "content-type": "application/json; charset=utf-8" } });
   }
 
   return json({ error: "not found" }, 404);
@@ -410,12 +593,13 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
 export default {
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     // Run the availability check, then refresh WHOIS data (sequentially, so we
-    // never hold two INWX sessions at once).
+    // never hold two INWX sessions at once). A lock guards against overlap with
+    // a manually triggered run.
     ctx.waitUntil(
-      (async () => {
+      withLock(env, async () => {
         await runAndStore(env);
         await refreshWhois(env);
-      })(),
+      }).then(() => undefined),
     );
   },
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {

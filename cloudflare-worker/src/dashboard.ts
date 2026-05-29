@@ -138,6 +138,20 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
       </div>
       <p id="whois-empty" class="muted" hidden>Noch keine WHOIS-Daten. Klicke „WHOIS aktualisieren".</p>
     </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>Verlauf</h2>
+        <span class="muted">letzte Läufe</span>
+      </div>
+      <div class="table-wrap">
+        <table id="history">
+          <thead><tr><th>Zeitpunkt</th><th>Geprüft</th><th>verfügbar</th><th>gekauft</th><th>fehlgeschlagen</th><th>Fehler</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="history-empty" class="muted" hidden>Noch kein Verlauf.</p>
+    </section>
   </div>
 </main>
 <footer>INWX Bot &middot; Cron-gesteuerter Domain-Check auf Cloudflare Workers</footer>
@@ -300,8 +314,41 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
     }).then(function (rec) { renderWhois(rec); });
   }
 
+  function addCell(tr, text, cls) {
+    var td = document.createElement('td');
+    td.textContent = text;
+    if (cls) { td.className = cls; }
+    tr.appendChild(td);
+  }
+
+  function renderHistory(list) {
+    var tbody = el('history').querySelector('tbody'); clearNode(tbody);
+    list = list || [];
+    show(el('history-empty'), list.length === 0);
+    var i;
+    for (i = 0; i < list.length; i++) {
+      var h = list[i];
+      var counts = h.counts || {};
+      var tr = document.createElement('tr');
+      addCell(tr, fmtTime(h.timestamp));
+      addCell(tr, String(h.total || 0));
+      addCell(tr, String(counts['would_purchase'] || 0));
+      addCell(tr, String(counts['purchased'] || 0));
+      addCell(tr, String(counts['purchase_failed'] || 0));
+      addCell(tr, h.error ? h.error : String(counts['error'] || 0), h.error ? 'error' : '');
+      tbody.appendChild(tr);
+    }
+  }
+
+  function loadHistory() {
+    return api('/api/history').then(function (r) {
+      if (r.status === 401) { throw { auth: true }; }
+      return r.json();
+    }).then(function (list) { renderHistory(list); });
+  }
+
   function loadAuthed() {
-    return Promise.all([loadDomains(), loadResults(), loadWhois()]).then(function () {
+    return Promise.all([loadDomains(), loadResults(), loadWhois(), loadHistory()]).then(function () {
       showApp(true);
     }).catch(function (e) {
       if (e && e.auth) {
@@ -317,7 +364,7 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
       api('/api/results.json').then(function (r) { return r.json(); }).then(function (rec) {
         var ts = (rec && rec.timestamp) ? rec.timestamp : null;
         if (ts && ts !== before) {
-          lastTimestamp = ts; renderStatus(rec); renderResults(rec);
+          lastTimestamp = ts; renderStatus(rec); renderResults(rec); loadHistory();
           el('run-msg').textContent = 'Prüfung abgeschlossen.';
           el('run').disabled = false;
         } else {
@@ -334,7 +381,7 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
   });
   el('token').addEventListener('keydown', function (e) { if (e.key === 'Enter') { el('connect').click(); } });
   el('logout').addEventListener('click', function () { setToken(''); showApp(false); });
-  el('refresh').addEventListener('click', function () { loadResults(); });
+  el('refresh').addEventListener('click', function () { loadResults(); loadHistory(); });
 
   el('save-domains').addEventListener('click', function () {
     var btn = this; btn.disabled = true;
