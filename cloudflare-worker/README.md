@@ -11,6 +11,8 @@ Workers), and stores the domain list and results in **Workers KV**.
 - It logs in to INWX, checks each domain from the KV list with `domain.check`,
   and — unless `DRY_RUN` is on — registers free ones with `domain.create`.
 - Results are written to KV (`results:latest.json` and `results:latest.csv`).
+- A **web dashboard** is served at `/` to view status, edit the domain list,
+  trigger a run, and download the CSV.
 - Optional: a notification is POSTed to a Slack/Discord-compatible webhook when
   something noteworthy happens (a domain is available, bought, or a run fails).
 
@@ -46,8 +48,9 @@ npx wrangler secret put INWX_NS2
 # 3. Deploy.
 npx wrangler deploy
 
-# 4. Seed the domain list (one per line, or a JSON array).
-curl -X PUT https://inwx-bot.<your-subdomain>.workers.dev/domains \
+# 4. Seed the domain list — either in the dashboard at
+#    https://inwx-bot.<your-subdomain>.workers.dev/  or via the API:
+curl -X PUT https://inwx-bot.<your-subdomain>.workers.dev/api/domains \
   -H "Authorization: Bearer <ADMIN_TOKEN>" \
   --data-binary $'example.de\nmy-other-domain.com'
 ```
@@ -74,19 +77,34 @@ Secrets (set with `wrangler secret put`): `INWX_USERNAME`, `INWX_PASSWORD`,
 
 The schedule is controlled by the `crons` array in `wrangler.toml`.
 
+## Dashboard
+
+Open the Worker URL (`https://inwx-bot.<your-subdomain>.workers.dev/`) in a
+browser. The page is public, but all data is gated behind the admin token:
+enter your `ADMIN_TOKEN` once (kept in the browser's `sessionStorage`) to
+
+- see the last run's status and per-domain results,
+- edit and save the domain list,
+- trigger a check immediately ("Jetzt prüfen"),
+- download the results as CSV.
+
+A strict Content-Security-Policy (nonce-based, no external assets) is applied.
+
 ## HTTP endpoints
 
-All except `GET /` require `Authorization: Bearer <ADMIN_TOKEN>`.
+`GET /` (dashboard) and `GET /api/status` are public. Everything else requires
+`Authorization: Bearer <ADMIN_TOKEN>`.
 
-| Method & path        | Description                                              |
-|----------------------|----------------------------------------------------------|
-| `GET /`              | Health/status: last run time, domain count, last error.  |
-| `GET /domains`       | Current domain list.                                     |
-| `PUT /domains`       | Replace the list (newline-separated text or JSON array). |
-| `POST /run`          | Run the check now and return the result.                 |
-| `POST /run?async=true` | Start a run in the background, return `202` immediately. |
-| `GET /results.json`  | Full result of the last run.                             |
-| `GET /results.csv`   | Last run as CSV (same columns as the Python script).     |
+| Method & path             | Description                                              |
+|---------------------------|----------------------------------------------------------|
+| `GET /`                   | Web dashboard (HTML).                                    |
+| `GET /api/status`         | Health/status: dry-run mode, last run time, last error.  |
+| `GET /api/domains`        | Current domain list.                                     |
+| `PUT /api/domains`        | Replace the list (newline-separated text or JSON array). |
+| `POST /api/run`           | Run the check now and return the result.                 |
+| `POST /api/run?async=true`| Start a run in the background, return `202` immediately. |
+| `GET /api/results.json`   | Full result of the last run.                             |
+| `GET /api/results.csv`    | Last run as CSV (same columns as the Python script).     |
 
 ## Local development
 

@@ -3,11 +3,14 @@
  *
  * - A Cron Trigger runs the check on a schedule (see wrangler.toml).
  * - The domain list and the latest results live in a KV namespace.
- * - HTTP endpoints (bearer-token protected) let you manage the list,
- *   trigger a run, and download results.
+ * - A web dashboard is served at `/`.
+ * - JSON/CSV endpoints under `/api/*` (bearer-token protected, except the
+ *   public `/api/status`) let you manage the list, trigger a run, and
+ *   download results.
  *
  * This mirrors the behaviour of the Python `check_domain.py` script.
  */
+import { dashboardPage } from "./dashboard";
 import { InwxClient, type AccountInfo } from "./inwx";
 
 export interface Env {
@@ -231,13 +234,29 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
-  // Public, low-detail health endpoint (no domain details leaked).
-  if (request.method === "GET" && path === "/") {
+  // Web dashboard (public shell; data calls below need the admin token).
+  if (request.method === "GET" && (path === "/" || path === "/dashboard")) {
+    const nonce = crypto.randomUUID().replace(/-/g, "");
+    return new Response(dashboardPage(nonce), {
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "content-security-policy":
+          `default-src 'none'; base-uri 'none'; form-action 'self'; connect-src 'self'; ` +
+          `img-src data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'`,
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  // Public, low-detail status endpoint (no domain details leaked).
+  if (request.method === "GET" && path === "/api/status") {
     const raw = await env.INWX_BOT.get(RESULTS_JSON_KEY);
     const last = raw ? (JSON.parse(raw) as RunRecord) : null;
     return json({
       ok: true,
       service: "inwx-bot worker",
+      dryRun: isTrue(env.DRY_RUN),
+      authConfigured: Boolean(env.ADMIN_TOKEN),
       lastRun: last?.timestamp ?? null,
       lastRunDomains: last?.statuses.length ?? 0,
       lastRunError: last?.error ?? null,
@@ -247,17 +266,17 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
   // Everything below requires the admin bearer token.
   if (!isAuthorized(request, env)) return unauthorized();
 
-  if (request.method === "GET" && path === "/results.csv") {
+  if (request.method === "GET" && path === "/api/results.csv") {
     const csv = (await env.INWX_BOT.get(RESULTS_CSV_KEY)) ?? "";
     return new Response(csv, { headers: { "content-type": "text/csv; charset=utf-8" } });
   }
 
-  if (request.method === "GET" && path === "/results.json") {
+  if (request.method === "GET" && path === "/api/results.json") {
     const raw = await env.INWX_BOT.get(RESULTS_JSON_KEY);
     return new Response(raw ?? "{}", { headers: { "content-type": "application/json; charset=utf-8" } });
   }
 
-  if (path === "/domains") {
+  if (path === "/api/domains") {
     if (request.method === "GET") {
       return json({ domains: await loadDomains(env) });
     }
@@ -268,7 +287,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     }
   }
 
-  if (request.method === "POST" && path === "/run") {
+  if (request.method === "POST" && path === "/api/run") {
     // `?async=true` returns immediately and runs in the background; otherwise
     // the run completes inline (suitable for small lists / manual triggers).
     if (url.searchParams.get("async") === "true") {
