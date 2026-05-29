@@ -112,10 +112,22 @@ export class InwxClient {
     }
   }
 
-  async isDomainFree(domain: string): Promise<boolean> {
+  /**
+   * Check availability and (best-effort) price in a single `domain.check`.
+   * `price` is null when INWX does not return one for this domain.
+   */
+  async checkDomain(domain: string): Promise<{ avail: boolean; price: number | null }> {
     const result = await this.call("domain.check", { domain }, "during domain check");
-    const data = result.resData as { domain?: Array<{ avail?: number | boolean }> } | undefined;
-    return Boolean(data?.domain?.[0]?.avail);
+    const entry = (result.resData as { domain?: Array<Record<string, unknown>> } | undefined)?.domain?.[0] ?? {};
+    const raw = entry.price ?? entry.checkPrice ?? null;
+    let price: number | null = null;
+    if (typeof raw === "number" && Number.isFinite(raw)) price = raw;
+    else if (typeof raw === "string" && raw.trim() !== "" && Number.isFinite(Number(raw))) price = Number(raw);
+    return { avail: Boolean(entry.avail), price };
+  }
+
+  async isDomainFree(domain: string): Promise<boolean> {
+    return (await this.checkDomain(domain)).avail;
   }
 
   async getAccountInfo(): Promise<AccountInfo> {

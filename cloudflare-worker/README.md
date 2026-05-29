@@ -8,8 +8,11 @@ Workers), and stores the domain list and results in **Workers KV**.
 ## How it works
 
 - A **Cron Trigger** invokes the Worker on a schedule (default: daily 06:00 UTC).
-- It logs in to INWX, checks each domain from the KV list with `domain.check`,
-  and — unless `DRY_RUN` is on — registers free ones with `domain.create`.
+- It logs in to INWX and checks each domain from the KV list with `domain.check`.
+  Each domain has a **mode**: `auto` registers it when free (unless `DRY_RUN`),
+  `watch` only reports. An optional per-domain **max price** skips auto-purchase
+  when the INWX price exceeds the budget. You can also buy an available domain
+  on demand from the dashboard ("Kaufen").
 - Results are written to KV (`results:latest.json` and `results:latest.csv`).
 - It also refreshes **WHOIS/registration metadata** per domain (registered /
   expires / last changed / status) and stores it in KV (`whois:latest.json`).
@@ -55,12 +58,20 @@ npx wrangler secret put INWX_NS2
 # 3. Deploy.
 npx wrangler deploy
 
-# 4. Seed the domain list — either in the dashboard at
-#    https://inwx-bot.<your-subdomain>.workers.dev/  or via the API:
+# 4. Seed the domain list — easiest in the dashboard at
+#    https://inwx-bot.<your-subdomain>.workers.dev/  or via the API.
+# Plain list (every entry defaults to mode "auto"):
 curl -X PUT https://inwx-bot.<your-subdomain>.workers.dev/api/domains \
   -H "Authorization: Bearer <ADMIN_TOKEN>" \
   --data-binary $'example.de\nmy-other-domain.com'
+# …or full per-domain config as JSON:
+curl -X PUT https://inwx-bot.<your-subdomain>.workers.dev/api/domains \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" -H "content-type: application/json" \
+  --data '[{"domain":"example.de","mode":"auto","maxPrice":15},{"domain":"premium.com","mode":"watch"}]'
 ```
+
+Each entry is `{ "domain", "mode": "auto"|"watch", "maxPrice"?, "tags"?, "notes"? }`.
+Plain strings and newline lists stay supported and default to `mode: "auto"`.
 
 You can also set the domain list without the HTTP API:
 
@@ -92,11 +103,12 @@ browser. The page is public, but all data is gated behind the admin token:
 enter your `ADMIN_TOKEN` once (kept in the browser's `sessionStorage`) to
 
 - see the last run's status and per-domain results,
-- edit and save the domain list,
+- edit the domain list in a table (mode `auto`/`watch`, max price, tags),
+- **buy an available domain on demand** ("Kaufen" button, with confirmation),
 - trigger a check immediately ("Jetzt prüfen"),
 - view the **WHOIS / domain-status table** (registered / expires / last changed /
   status per domain; expiry within 30 days is highlighted) and refresh it,
-- download the results as CSV.
+- review the run **history**, and download the results as CSV.
 
 A strict Content-Security-Policy (nonce-based, no external assets) is applied.
 
@@ -121,18 +133,21 @@ The table refreshes on each cron run and via the "WHOIS aktualisieren" button.
 |---------------------------|----------------------------------------------------------|
 | `GET /`                   | Web dashboard (HTML).                                    |
 | `GET /api/status`         | Health/status: dry-run mode, last run time, last error.  |
-| `GET /api/domains`        | Current domain list.                                     |
-| `PUT /api/domains`        | Replace the list (newline-separated text or JSON array). |
+| `GET /api/domains`        | Current domain list (array of per-domain config objects).|
+| `PUT /api/domains`        | Replace the list (config JSON, string array, or text).   |
 | `POST /api/run`           | Run the check now and return the result.                 |
 | `POST /api/run?async=true`| Start a run in the background, return `202` immediately. |
+| `POST /api/buy`           | Register one available domain now: `{"domain":"x.de"}`.  |
 | `GET /api/results.json`   | Full result of the last run.                             |
 | `GET /api/results.csv`    | Last run as CSV (same columns as the Python script).     |
 | `GET /api/whois`          | WHOIS/registration metadata per domain (last refresh).   |
 | `POST /api/whois/refresh` | Refresh WHOIS data now (`?async=true` for background).    |
 | `GET /api/history`        | Recent run history (capped list, newest first).          |
 
-`POST /api/run` and `POST /api/whois/refresh` return `409` if another run is
-already in progress (best-effort KV lock).
+`POST /api/run`, `POST /api/whois/refresh` and `POST /api/buy` return `409` if
+another run is already in progress (best-effort KV lock). `POST /api/buy` is an
+explicit action and **ignores `DRY_RUN` and the per-domain mode** — it always
+attempts the real (paid) registration.
 
 ## Local development
 
