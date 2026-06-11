@@ -98,6 +98,7 @@ Non-secret settings live in `wrangler.toml` under `[vars]`:
 | `RENEWAL_MODE`     | `"AUTORENEW"`                        | `domain.create` renewal mode.                 |
 | `TRANSFER_LOCK`    | `"true"`                             | Lock transfers on newly registered domains.   |
 | `PERIOD`           | —                                    | Registration period (e.g. `1Y`); empty = min. |
+| `WHOIS_PORT43`     | `"false"`                            | Opt-in port-43 WHOIS fallback (see below).    |
 
 Secrets (set with `wrangler secret put`): `INWX_USERNAME`, `INWX_PASSWORD`,
 `ADMIN_TOKEN`, and the optional `INWX_SHARED_SECRET`, `NOTIFY_WEBHOOK_URL`,
@@ -154,9 +155,14 @@ Registration metadata is gathered per domain from two sources:
 
 - **INWX `domain.info`** for domains in your own account — authoritative dates
   (registered / expires / last changed) and status, works for every TLD.
-- **RDAP** (the JSON successor to WHOIS) for all other domains. Note that some
-  ccTLDs — notably **.de** (DENIC) — do not publish registration/expiry over
-  RDAP, so those columns may stay empty for domains you don't own.
+- **RDAP** (the JSON successor to WHOIS) for all other domains. Some ccTLDs —
+  notably **.de** (DENIC) — aren't covered by RDAP; for those the table reports
+  the dates as *unknown* (rather than falsely "available") unless port-43 is on.
+- **Port-43 WHOIS** (opt-in via `WHOIS_PORT43="true"`): a raw WHOIS query over
+  TCP for the handful of ccTLDs RDAP doesn't cover. It's best-effort and
+  time-boxed (5 s) so it can never stall a run — many registries block
+  datacenter IPs, so it often returns nothing, and DENIC never publishes
+  registration/expiry anyway (only status + last change).
 
 The table refreshes on each cron run and via the "WHOIS aktualisieren" button.
 

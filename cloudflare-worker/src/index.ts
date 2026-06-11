@@ -12,7 +12,7 @@
  */
 import { dashboardPage } from "./dashboard";
 import { InwxClient, type AccountInfo } from "./inwx";
-import { lookupRdap, type WhoisInfo } from "./whois";
+import { lookupWhois, type WhoisInfo } from "./whois";
 
 export interface Env {
   INWX_BOT: KVNamespace;
@@ -36,6 +36,7 @@ export interface Env {
   RESEND_API_KEY?: string;
   EMAIL_TO?: string;
   EMAIL_FROM?: string;
+  WHOIS_PORT43?: string;
 }
 
 type Action = "skipped" | "purchased" | "purchase_failed" | "would_purchase" | "error";
@@ -716,8 +717,8 @@ function inwxToWhois(domain: string, info: Record<string, unknown>): WhoisInfo {
   };
 }
 
-/** Prefer authoritative INWX data for owned domains; fall back to RDAP. */
-async function enrichDomain(client: InwxClient | null, domain: string): Promise<WhoisInfo> {
+/** Prefer authoritative INWX data for owned domains; fall back to RDAP/WHOIS. */
+async function enrichDomain(client: InwxClient | null, domain: string, port43: boolean): Promise<WhoisInfo> {
   if (client) {
     try {
       const info = await client.getDomainInfo(domain);
@@ -726,13 +727,14 @@ async function enrichDomain(client: InwxClient | null, domain: string): Promise<
       // not owned / API hiccup -> fall back to RDAP
     }
   }
-  return lookupRdap(domain);
+  return lookupWhois(domain, { port43 });
 }
 
 async function refreshWhois(env: Env): Promise<WhoisRecord> {
   const timestamp = new Date().toISOString();
   const settings = await loadSettings(env);
   const delayMs = settings.apiDelayMs;
+  const port43 = isTrue(env.WHOIS_PORT43);
   const domains = await loadDomains(env);
 
   // Logging in is optional: without INWX credentials we still serve RDAP data.
@@ -754,7 +756,7 @@ async function refreshWhois(env: Env): Promise<WhoisRecord> {
     for (let i = 0; i < domains.length; i++) {
       if (i > 0 && delayMs > 0) await sleep(delayMs);
       try {
-        results.push(await enrichDomain(client, domains[i]));
+        results.push(await enrichDomain(client, domains[i], port43));
       } catch (e) {
         results.push({
           domain: domains[i],

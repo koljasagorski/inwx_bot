@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { parseRdap, lookupRdap } from "../src/whois";
+import { parseRdap, lookupRdap, parseWhoisText, whoisServerFor } from "../src/whois";
 
 describe("parseRdap", () => {
   it("extracts events, status and registrar", () => {
@@ -44,5 +44,39 @@ describe("lookupRdap", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 403 })));
     const out = await lookupRdap("x.com");
     expect(out.error).toContain("403");
+  });
+});
+
+describe("whoisServerFor", () => {
+  it("maps known ccTLDs and skips the rest (RDAP covers gTLDs)", () => {
+    expect(whoisServerFor("example.de")).toBe("whois.denic.de");
+    expect(whoisServerFor("EXAMPLE.AT")).toBe("whois.nic.at");
+    expect(whoisServerFor("example.com")).toBeNull();
+  });
+});
+
+describe("parseWhoisText", () => {
+  it("extracts dates and status from a gTLD-style response", () => {
+    const out = parseWhoisText(
+      [
+        "Domain Name: EXAMPLE.COM",
+        "Creation Date: 1997-09-15T04:00:00Z",
+        "Registry Expiry Date: 2028-09-14T04:00:00Z",
+        "Updated Date: 2024-08-14T07:01:34Z",
+        "Domain Status: clientTransferProhibited",
+      ].join("\n"),
+    );
+    expect(out.registered).toBe("1997-09-15T04:00:00Z");
+    expect(out.expires).toBe("2028-09-14T04:00:00Z");
+    expect(out.updated).toBe("2024-08-14T07:01:34Z");
+    expect(out.status).toEqual(["clientTransferProhibited"]);
+  });
+
+  it("handles a DENIC-style response (status + change, no expiry)", () => {
+    const out = parseWhoisText(["Status: connect", "Changed: 2023-02-11T10:00:00+01:00", "Nserver: ns.example.de"].join("\n"));
+    expect(out.status).toEqual(["connect"]);
+    expect(out.updated).toBe("2023-02-11T10:00:00+01:00");
+    expect(out.expires).toBeNull();
+    expect(out.registered).toBeNull();
   });
 });

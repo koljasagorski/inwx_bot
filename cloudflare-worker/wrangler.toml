@@ -31,5 +31,8 @@ EXPIRY_ALERT_DAYS = "30,14,7,1"
 RENEWAL_MODE = "AUTORENEW"
 TRANSFER_LOCK = "true"
 # PERIOD = "1Y"   # registration period; empty uses the INWX minimum
+# Opt-in port-43 WHOIS fallback for ccTLDs without RDAP dates (e.g. .de). Off by
+# default — many registries block datacenter IPs, so it often yields nothing.
+WHOIS_PORT43 = "false"
 # Uncomment to test against the INWX OT&E sandbox instead of production:
 # INWX_API_URL = "https://api.ote.domrobot.com/jsonrpc/"
