@@ -24,10 +24,10 @@ Workers), and stores the domain list and results in **Workers KV**.
   dashboard, and a per-domain **state** is kept (`state:domains`).
 - A **web dashboard** is served at `/` to view status, edit the domain list,
   trigger a run, view the WHOIS table and the run history, and download the CSV.
-- Optional notifications via a Slack/Discord-compatible webhook **and/or
-  Telegram** — sent only on **change** (a domain newly available / bought /
-  failed, or a new run error), not on every run, plus **expiry alerts** as
-  owned domains approach their renewal date (`EXPIRY_ALERT_DAYS` thresholds).
+- Optional notifications via a Slack/Discord-compatible webhook, **Telegram**
+  and/or **email** (Resend) — sent only on **change** (a domain newly available /
+  bought / failed, or a new run error), not on every run, plus **expiry alerts**
+  as owned domains approach their renewal date (`EXPIRY_ALERT_DAYS` thresholds).
 - A best-effort KV **lock** prevents a manual run from overlapping the cron run.
 - An optional **heartbeat** (`HEARTBEAT_URL`) is pinged after every cron run, so
   an external dead-man's-switch (e.g. healthchecks.io) can alert if it stalls.
@@ -102,6 +102,7 @@ Non-secret settings live in `wrangler.toml` under `[vars]`:
 Secrets (set with `wrangler secret put`): `INWX_USERNAME`, `INWX_PASSWORD`,
 `ADMIN_TOKEN`, and the optional `INWX_SHARED_SECRET`, `NOTIFY_WEBHOOK_URL`,
 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (Telegram notifications),
+`RESEND_API_KEY` + `EMAIL_TO` + `EMAIL_FROM` (email notifications via Resend),
 `HEARTBEAT_URL` (dead-man's-switch ping), `INWX_NS1`, `INWX_NS2`.
 
 Notifications are sent to every configured channel (Slack/Discord webhook and/or
@@ -126,9 +127,12 @@ enter your `ADMIN_TOKEN` once (kept in the browser's `sessionStorage`) to
 - run an ad-hoc **quick check** for a domain or a keyword across several TLDs,
 - view the **WHOIS / domain-status table** (registered / expires / last changed /
   status per domain; expiry within 30 days is highlighted) and refresh it,
-- review the run **history** and the **audit log**, and download the CSV,
-- change **settings** (dry-run, API delay, expiry thresholds) without redeploying,
-  or **reset** them back to the `wrangler.toml` defaults.
+- **filter and sort** the results and WHOIS tables (type to filter, click a
+  column header to sort),
+- review the run **history** and the **audit log**, download the CSV, or
+  **download a full backup** (domains + settings) for safekeeping,
+- change **settings** (dry-run, API delay, expiry thresholds, registration
+  options) without redeploying, or **reset** them to the `wrangler.toml` defaults.
 
 A strict Content-Security-Policy (nonce-based, no external assets) is applied,
 and the admin token is protected by per-IP brute-force throttling.
@@ -180,6 +184,8 @@ The table refreshes on each cron run and via the "WHOIS aktualisieren" button.
 | `DELETE /api/settings`    | Reset overrides to the `wrangler.toml` defaults.         |
 | `POST /api/check`         | Ad-hoc check: `{"domain"}` or `{"keyword","tlds":[]}`.   |
 | `GET /api/audit`          | Recent admin actions (capped, newest first).             |
+| `GET /api/export`         | Download a backup of the domain list + settings (JSON).  |
+| `POST /api/import`        | Restore from a backup: `{"domains":[…],"settings":{…}}`.  |
 
 `POST /api/run`, `POST /api/whois/refresh`, `POST /api/buy` and `POST /api/check`
 return `409` if another run is already in progress (best-effort KV lock).

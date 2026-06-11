@@ -24,6 +24,11 @@ ADMIN_TOKEN = "choose-a-long-random-token"
 # the cron ever stops firing.
 # HEARTBEAT_URL = "https://hc-ping.com/your-uuid"
 
+# Optional email notifications via Resend (all three required to enable).
+# RESEND_API_KEY = "re_..."
+# EMAIL_TO = "you@example.com"
+# EMAIL_FROM = "bot@your-verified-domain.com"
+
 # Optional default nameservers used on purchase.
 # INWX_NS1 = "ns.inwx.de"
 # INWX_NS2 = "ns2.inwx.de"
