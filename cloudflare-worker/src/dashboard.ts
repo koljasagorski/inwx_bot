@@ -107,7 +107,7 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
       <p class="muted">Modus <b>auto</b> registriert verfügbare Domains automatisch (sofern nicht im Probelauf); <b>watch</b> meldet nur. Max-Preis verhindert teure Auto-Käufe.</p>
       <div class="table-wrap">
         <table id="domains-table">
-          <thead><tr><th>Domain</th><th>Modus</th><th>Max-Preis</th><th>Tags</th><th></th></tr></thead>
+          <thead><tr><th>Domain</th><th>Modus</th><th>Max-Preis</th><th>Tags</th><th>Notiz</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -125,7 +125,7 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
       </div>
       <div class="table-wrap">
         <table id="results">
-          <thead><tr><th>Domain</th><th>Verfügbar</th><th>Status</th><th>Detail</th><th>Code</th><th></th></tr></thead>
+          <thead><tr><th>Domain</th><th>Verfügbar</th><th>Status</th><th>Detail</th><th>Code</th><th>Preis</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -189,7 +189,11 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
         <label class="srow"><span>API-Delay (ms)</span><input id="set-delay" type="number" min="0" /></label>
         <label class="srow"><span>Ablauf-Schwellen (Tage, kommagetrennt)</span><input id="set-thresholds" type="text" placeholder="30,14,7,1" /></label>
       </div>
-      <div class="actions mt"><button id="save-settings" class="btn btn-primary">Einstellungen speichern</button></div>
+      <div class="actions mt">
+        <button id="save-settings" class="btn btn-primary">Einstellungen speichern</button>
+        <button id="reset-settings" class="btn">Auf Standard zurücksetzen</button>
+      </div>
+      <p class="muted mt">Hinweis: Gespeicherte Werte überschreiben <code>wrangler.toml</code> dauerhaft – auch über Deploys hinweg – bis du auf Standard zurücksetzt.</p>
     </section>
 
     <section class="card">
@@ -279,25 +283,37 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
       var c3 = document.createElement('td'); c3.appendChild(badge(s.action)); tr.appendChild(c3);
       var c4 = document.createElement('td'); c4.textContent = s.detail || ''; tr.appendChild(c4);
       var c5 = document.createElement('td'); c5.textContent = (s.api_code === null || s.api_code === undefined) ? '' : String(s.api_code); tr.appendChild(c5);
-      var c6 = document.createElement('td');
+      var c6 = document.createElement('td'); c6.textContent = (s.price === null || s.price === undefined) ? '' : String(s.price); tr.appendChild(c6);
+      var c7 = document.createElement('td');
       if (s.action === 'would_purchase') {
         var bb = document.createElement('button'); bb.className = 'btn'; bb.textContent = 'Kaufen';
-        (function (dom, button) { button.addEventListener('click', function () { buyDomain(dom, button); }); })(s.domain, bb);
-        c6.appendChild(bb);
+        (function (dom, price, button, row) {
+          button.addEventListener('click', function () { buyDomain(dom, price, button, row); });
+        })(s.domain, s.price, bb, tr);
+        c7.appendChild(bb);
       }
-      tr.appendChild(c6);
+      tr.appendChild(c7);
       tbody.appendChild(tr);
     }
   }
 
-  function buyDomain(domain, button) {
-    if (!window.confirm('Domain wirklich kostenpflichtig registrieren: ' + domain + ' ?')) { return; }
+  function buyDomain(domain, price, button, row) {
+    var priceText = (price === null || price === undefined) ? '' : ' für ' + price;
+    if (!window.confirm('Domain kostenpflichtig registrieren: ' + domain + priceText + ' ?')) { return; }
     button.disabled = true; button.textContent = 'Kaufe…';
     api('/api/buy', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ domain: domain }) })
       .then(function (r) { if (r.status === 401) { throw { auth: true }; } return r.json(); })
       .then(function (res) {
-        window.alert(res.ok ? ('Gekauft: ' + domain) : ('Nicht gekauft: ' + (res.detail || res.error || 'Fehler')));
-        loadResults(); loadHistory();
+        if (res.ok) {
+          // Reflect the purchase immediately, then refresh the live data.
+          var statusCell = row.children[2]; clearNode(statusCell); statusCell.appendChild(badge('purchased'));
+          button.parentNode.removeChild(button);
+          window.alert('Registriert: ' + domain);
+        } else {
+          window.alert('Nicht gekauft: ' + (res.detail || res.error || 'Fehler'));
+          button.disabled = false; button.textContent = 'Kaufen';
+        }
+        loadResults(); loadHistory(); loadAudit();
       })
       .catch(function (e) { window.alert((e && e.auth) ? 'Nicht autorisiert.' : 'Fehler beim Kauf.'); button.disabled = false; button.textContent = 'Kaufen'; });
   }
@@ -363,10 +379,11 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
     var price = makeInput('number', (cfg.maxPrice !== undefined && cfg.maxPrice !== null) ? cfg.maxPrice : '', '', 'd-price');
     price.min = '0'; price.step = '0.01'; c3.appendChild(price); tr.appendChild(c3);
     var c4 = document.createElement('td'); c4.appendChild(makeInput('text', (cfg.tags || []).join(', '), 'tag1, tag2', 'd-tags')); tr.appendChild(c4);
-    var c5 = document.createElement('td');
+    var c5 = document.createElement('td'); c5.appendChild(makeInput('text', cfg.notes || '', 'Notiz', 'd-notes')); tr.appendChild(c5);
+    var c6 = document.createElement('td');
     var rm = document.createElement('button'); rm.className = 'btn'; rm.textContent = '✕';
     rm.addEventListener('click', function () { tr.parentNode.removeChild(tr); });
-    c5.appendChild(rm); tr.appendChild(c5);
+    c6.appendChild(rm); tr.appendChild(c6);
     el('domains-table').querySelector('tbody').appendChild(tr);
   }
 
@@ -391,6 +408,8 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
       if (priceVal !== '') { var p = Number(priceVal); if (!isNaN(p)) { cfg.maxPrice = p; } }
       var tagsVal = row.querySelector('.d-tags').value.trim();
       if (tagsVal !== '') { cfg.tags = tagsVal.split(',').map(function (t) { return t.trim(); }).filter(Boolean); }
+      var notesVal = row.querySelector('.d-notes').value.trim();
+      if (notesVal !== '') { cfg.notes = notesVal; }
       out.push(cfg);
     }
     return out;
@@ -646,6 +665,17 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
     api('/api/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(override) })
       .then(function (r) { if (r.status === 401) { throw { auth: true }; } return r.json(); })
       .then(function () { msg.textContent = 'Gespeichert.'; loadPublicStatus(); loadAudit(); })
+      .catch(function (e) { msg.textContent = (e && e.auth) ? 'Nicht autorisiert.' : 'Fehler.'; })
+      .then(function () { btn.disabled = false; });
+  });
+
+  el('reset-settings').addEventListener('click', function () {
+    if (!window.confirm('Alle Overrides löschen und auf die wrangler.toml-Standardwerte zurücksetzen?')) { return; }
+    var btn = this; btn.disabled = true;
+    var msg = el('settings-msg'); show(msg, true); msg.textContent = 'Setze zurück…';
+    api('/api/settings', { method: 'DELETE' })
+      .then(function (r) { if (r.status === 401) { throw { auth: true }; } return r.json(); })
+      .then(function () { msg.textContent = 'Zurückgesetzt.'; loadSettings(); loadPublicStatus(); loadAudit(); })
       .catch(function (e) { msg.textContent = (e && e.auth) ? 'Nicht autorisiert.' : 'Fehler.'; })
       .then(function () { btn.disabled = false; });
   });

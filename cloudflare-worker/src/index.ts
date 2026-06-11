@@ -40,6 +40,7 @@ interface DomainStatus {
   detail: string;
   api_code: number | null;
   api_msg: string | null;
+  price?: number | null;
 }
 
 interface RunRecord {
@@ -295,7 +296,7 @@ async function appendHistory(env: Env, summary: RunSummary): Promise<void> {
 // Best-effort mutual exclusion. KV is eventually consistent, so this only
 // guards against the common case (an overlapping manual + scheduled run); it is
 // not a hard lock.
-async function acquireLock(env: Env, token: string, ttlSeconds = 600): Promise<boolean> {
+async function acquireLock(env: Env, token: string, ttlSeconds = 1800): Promise<boolean> {
   if (await env.INWX_BOT.get(LOCK_KEY)) return false;
   await env.INWX_BOT.put(LOCK_KEY, token, { expirationTtl: ttlSeconds });
   return true;
@@ -404,10 +405,11 @@ async function processDomain(
     detail,
     api_code: null,
     api_msg: null,
+    price,
   });
 
   if (!avail) {
-    return { domain, available: false, action: "skipped", detail: "already registered", api_code: 1000, api_msg: "domain not available" };
+    return { domain, available: false, action: "skipped", detail: "already registered", api_code: 1000, api_msg: "domain not available", price };
   }
   // Available — decide whether to actually register it.
   if (cfg.mode === "watch") return notBought(`watch-only${priceNote}`);
@@ -419,9 +421,9 @@ async function processDomain(
 
   const { success, code, msg } = await client.buyDomain(buyParamsFor(domain, accountInfo, ns));
   if (success) {
-    return { domain, available: true, action: "purchased", detail: `success${priceNote}`, api_code: code ?? null, api_msg: msg };
+    return { domain, available: true, action: "purchased", detail: `success${priceNote}`, api_code: code ?? null, api_msg: msg, price };
   }
-  return { domain, available: true, action: "purchase_failed", detail: `Code ${code}: ${msg}`, api_code: code ?? null, api_msg: msg };
+  return { domain, available: true, action: "purchase_failed", detail: `Code ${code}: ${msg}`, api_code: code ?? null, api_msg: msg, price };
 }
 
 async function runCheck(env: Env, settings: Settings): Promise<DomainStatus[]> {
@@ -471,7 +473,7 @@ async function runCheck(env: Env, settings: Settings): Promise<DomainStatus[]> {
 async function buyDomainNow(
   env: Env,
   domain: string,
-): Promise<{ ok: boolean; action: Action; detail: string; code?: number }> {
+): Promise<{ ok: boolean; action: Action; detail: string; code?: number; price?: number | null }> {
   if (!env.INWX_USERNAME || !env.INWX_PASSWORD) {
     return { ok: false, action: "error", detail: "INWX credentials not configured" };
   }
@@ -480,19 +482,41 @@ async function buyDomainNow(
   try {
     await client.login(env.INWX_USERNAME, env.INWX_PASSWORD, env.INWX_SHARED_SECRET);
     loggedIn = true;
-    const { avail } = await client.checkDomain(domain);
-    if (!avail) return { ok: false, action: "skipped", detail: "not available" };
+    const { avail, price } = await client.checkDomain(domain);
+    if (!avail) return { ok: false, action: "skipped", detail: "not available", price };
     const accountInfo = await client.getAccountInfo();
     const ns = [env.INWX_NS1, env.INWX_NS2].filter((v): v is string => Boolean(v));
     const { success, code, msg } = await client.buyDomain(buyParamsFor(domain, accountInfo, ns));
-    return success
-      ? { ok: true, action: "purchased", detail: "success", code }
-      : { ok: false, action: "purchase_failed", detail: `Code ${code}: ${msg}`, code };
+    if (success) {
+      await markDomainPurchased(env, domain, price);
+      await notify(env, `INWX-Bot: Domain registriert – ${domain}${price !== null ? ` (Preis ${price})` : ""}`);
+      return { ok: true, action: "purchased", detail: "success", code, price };
+    }
+    return { ok: false, action: "purchase_failed", detail: `Code ${code}: ${msg}`, code, price };
   } catch (e) {
     return { ok: false, action: "error", detail: e instanceof Error ? e.message : String(e) };
   } finally {
     if (loggedIn) await client.logout().catch(() => {});
   }
+}
+
+/** Keep stored results/state consistent after an on-demand purchase. */
+async function markDomainPurchased(env: Env, domain: string, price: number | null): Promise<void> {
+  const record = await readJson<RunRecord | null>(env, RESULTS_JSON_KEY, null);
+  if (record && Array.isArray(record.statuses)) {
+    const row = record.statuses.find((s) => s.domain === domain);
+    if (row) {
+      row.action = "purchased";
+      row.available = true;
+      row.detail = "manuell gekauft";
+      row.price = price;
+      await env.INWX_BOT.put(RESULTS_JSON_KEY, JSON.stringify(record, null, 2));
+      await env.INWX_BOT.put(RESULTS_CSV_KEY, toCsv(record.statuses));
+    }
+  }
+  const state = await loadState(env);
+  state[domain] = { ...state[domain], action: "purchased", available: true };
+  await saveState(env, state);
 }
 
 interface CheckResult {
@@ -876,6 +900,12 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       await env.INWX_BOT.put(SETTINGS_KEY, JSON.stringify(override));
       await audit(env, request, "settings.save", JSON.stringify(override));
       return json({ ok: true, override, effective: await loadSettings(env) });
+    }
+    if (request.method === "DELETE") {
+      // Drop all overrides and fall back to the wrangler.toml defaults.
+      await env.INWX_BOT.delete(SETTINGS_KEY);
+      await audit(env, request, "settings.reset");
+      return json({ ok: true, override: {}, effective: await loadSettings(env) });
     }
   }
 

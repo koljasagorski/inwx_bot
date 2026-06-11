@@ -106,15 +106,17 @@ Open the Worker URL (`https://inwx-bot.<your-subdomain>.workers.dev/`) in a
 browser. The page is public, but all data is gated behind the admin token:
 enter your `ADMIN_TOKEN` once (kept in the browser's `sessionStorage`) to
 
-- see the last run's status and per-domain results,
-- edit the domain list in a table (mode `auto`/`watch`, max price, tags),
-- **buy an available domain on demand** ("Kaufen" button, with confirmation),
+- see the last run's status and per-domain results, including the **price**,
+- edit the domain list in a table (mode `auto`/`watch`, max price, tags, notes),
+- **buy an available domain on demand** ("Kaufen" button — the confirmation shows
+  the price, the row updates immediately, and a notification is sent),
 - trigger a check immediately ("Jetzt prüfen"),
 - run an ad-hoc **quick check** for a domain or a keyword across several TLDs,
 - view the **WHOIS / domain-status table** (registered / expires / last changed /
   status per domain; expiry within 30 days is highlighted) and refresh it,
 - review the run **history** and the **audit log**, and download the CSV,
-- change **settings** (dry-run, API delay, expiry thresholds) without redeploying.
+- change **settings** (dry-run, API delay, expiry thresholds) without redeploying,
+  or **reset** them back to the `wrangler.toml` defaults.
 
 A strict Content-Security-Policy (nonce-based, no external assets) is applied,
 and the admin token is protected by per-IP brute-force throttling.
@@ -125,6 +127,10 @@ and the admin token is protected by per-IP brute-force throttling.
 `PUT /api/settings`) can override `dryRun`, `apiDelayMs` and `expiryAlertDays`
 at runtime — stored in KV (`settings:config`) and applied without a redeploy.
 Toggling dry-run off from the dashboard asks for confirmation first.
+
+> **Note:** a stored override **persists across deploys** until you reset it.
+> Use the dashboard's "Auf Standard zurücksetzen" button or `DELETE /api/settings`
+> to drop all overrides and fall back to `wrangler.toml`.
 
 ### WHOIS / domain status
 
@@ -159,6 +165,7 @@ The table refreshes on each cron run and via the "WHOIS aktualisieren" button.
 | `GET /api/history`        | Recent run history (capped list, newest first).          |
 | `GET /api/settings`       | Effective settings + the stored KV override.             |
 | `PUT /api/settings`       | Override `dryRun` / `apiDelayMs` / `expiryAlertDays`.    |
+| `DELETE /api/settings`    | Reset overrides to the `wrangler.toml` defaults.         |
 | `POST /api/check`         | Ad-hoc check: `{"domain"}` or `{"keyword","tlds":[]}`.   |
 | `GET /api/audit`          | Recent admin actions (capped, newest first).             |
 

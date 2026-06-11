@@ -8,3 +8,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+
+# Wrangler local cache / state (should never be committed)
+.wrangler/
+node_modules/
