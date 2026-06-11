@@ -33,6 +33,9 @@ export interface Env {
   PERIOD?: string;
   TRANSFER_LOCK?: string;
   HEARTBEAT_URL?: string;
+  RESEND_API_KEY?: string;
+  EMAIL_TO?: string;
+  EMAIL_FROM?: string;
 }
 
 type Action = "skipped" | "purchased" | "purchase_failed" | "would_purchase" | "error";
@@ -403,9 +406,27 @@ async function sendTelegram(env: Env, text: string): Promise<void> {
   }
 }
 
-/** Fan out a notification to all configured channels (webhook + Telegram). */
+async function sendEmail(env: Env, text: string): Promise<void> {
+  if (!env.RESEND_API_KEY || !env.EMAIL_TO || !env.EMAIL_FROM) return;
+  try {
+    await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${env.RESEND_API_KEY}` },
+      body: JSON.stringify({ from: env.EMAIL_FROM, to: [env.EMAIL_TO], subject: text.slice(0, 120), text }),
+    });
+  } catch {
+    // Notifications are best-effort.
+  }
+}
+
+/** True if at least one notification channel is configured. */
+function hasNotifyChannel(env: Env): boolean {
+  return Boolean(env.NOTIFY_WEBHOOK_URL || env.TELEGRAM_BOT_TOKEN || env.RESEND_API_KEY);
+}
+
+/** Fan out a notification to all configured channels (webhook + Telegram + email). */
 async function notify(env: Env, text: string, extra: Record<string, unknown> = {}): Promise<void> {
-  await Promise.all([sendWebhook(env, text, extra), sendTelegram(env, text)]);
+  await Promise.all([sendWebhook(env, text, extra), sendTelegram(env, text), sendEmail(env, text)]);
 }
 
 function buyParamsFor(
@@ -621,7 +642,7 @@ const ACTION_LABELS_DE: Record<Action, string> = {
 };
 
 async function notifyRun(env: Env, record: RunRecord, changes: DomainChange[]): Promise<void> {
-  if (!env.NOTIFY_WEBHOOK_URL && !env.TELEGRAM_BOT_TOKEN) return;
+  if (!hasNotifyChannel(env)) return;
 
   // De-duplicate fatal run errors so a persistent failure does not spam.
   if (record.error) {
@@ -998,6 +1019,41 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     return new Response(raw ?? "[]", {
       headers: { "content-type": "application/json; charset=utf-8", "x-content-type-options": "nosniff" },
     });
+  }
+
+  if (request.method === "GET" && path === "/api/export") {
+    const [domains, settings] = await Promise.all([
+      loadDomainConfigs(env),
+      readJson<SettingsOverride>(env, SETTINGS_KEY, {}),
+    ]);
+    return new Response(JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), domains, settings }, null, 2), {
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "content-disposition": 'attachment; filename="inwx-bot-backup.json"',
+        "x-content-type-options": "nosniff",
+      },
+    });
+  }
+
+  if (request.method === "POST" && path === "/api/import") {
+    let body: { domains?: unknown; settings?: SettingsOverride } = {};
+    try {
+      body = (await request.json()) as { domains?: unknown; settings?: SettingsOverride };
+    } catch {
+      return json({ ok: false, error: "invalid JSON" }, 400);
+    }
+    const restored: string[] = [];
+    if (Array.isArray(body.domains)) {
+      const domains = body.domains.map(normalizeConfig).filter((c): c is DomainConfig => c !== null);
+      await env.INWX_BOT.put(DOMAINS_KEY, JSON.stringify(domains));
+      restored.push(`${domains.length} domains`);
+    }
+    if (body.settings && typeof body.settings === "object") {
+      await env.INWX_BOT.put(SETTINGS_KEY, JSON.stringify(body.settings));
+      restored.push("settings");
+    }
+    await audit(env, request, "import", restored.join(", ") || "nothing");
+    return json({ ok: true, restored });
   }
 
   return json({ error: "not found" }, 404);

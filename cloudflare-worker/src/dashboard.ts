@@ -45,6 +45,8 @@ textarea{resize:vertical}
 table{width:100%;border-collapse:collapse;font-size:14px}
 th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}
 th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+thead th{cursor:pointer;user-select:none}
+.filter-input{max-width:260px}
 .table-wrap{overflow-x:auto}
 .muted{color:var(--muted);font-size:13px}
 .error{color:var(--err);font-size:13px}
@@ -121,7 +123,10 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
     <section class="card">
       <div class="card-head">
         <h2>Ergebnisse</h2>
-        <button id="download" class="btn">CSV herunterladen</button>
+        <div class="actions">
+          <input id="results-filter" class="filter-input" type="text" placeholder="filtern…" />
+          <button id="download" class="btn">CSV herunterladen</button>
+        </div>
       </div>
       <div class="table-wrap">
         <table id="results">
@@ -136,6 +141,7 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
       <div class="card-head">
         <h2>WHOIS / Domain-Status</h2>
         <div class="actions">
+          <input id="whois-filter" class="filter-input" type="text" placeholder="filtern…" />
           <span id="whois-time" class="muted"></span>
           <button id="whois-refresh" class="btn">WHOIS aktualisieren</button>
         </div>
@@ -201,6 +207,7 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
       <div class="actions mt">
         <button id="save-settings" class="btn btn-primary">Einstellungen speichern</button>
         <button id="reset-settings" class="btn">Auf Standard zurücksetzen</button>
+        <button id="export-btn" class="btn">Backup herunterladen</button>
       </div>
       <p class="muted mt">Hinweis: Gespeicherte Werte überschreiben <code>wrangler.toml</code> dauerhaft – auch über Deploys hinweg – bis du auf Standard zurücksetzt.</p>
     </section>
@@ -304,6 +311,7 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
       tr.appendChild(c7);
       tbody.appendChild(tr);
     }
+    applyFilter(el('results-filter'), el('results'));
   }
 
   function buyDomain(domain, price, button, row) {
@@ -461,6 +469,7 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
       var cSrc = document.createElement('td'); cSrc.textContent = w.source || '–'; cSrc.className = 'muted'; tr.appendChild(cSrc);
       tbody.appendChild(tr);
     }
+    applyFilter(el('whois-filter'), el('whois'));
   }
 
   function loadWhois() {
@@ -694,6 +703,55 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
       .catch(function (e) { msg.textContent = (e && e.auth) ? 'Nicht autorisiert.' : 'Fehler.'; })
       .then(function () { btn.disabled = false; });
   });
+
+  el('export-btn').addEventListener('click', function () {
+    api('/api/export').then(function (r) { if (r.status === 401) { throw { auth: true }; } return r.text(); }).then(function (text) {
+      var blob = new Blob([text], { type: 'application/json' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a'); a.href = url; a.download = 'inwx-bot-backup.json';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }).catch(function (e) { window.alert((e && e.auth) ? 'Nicht autorisiert.' : 'Fehler beim Export.'); });
+  });
+
+  // Client-side comfort: live row filtering + click-to-sort on read-only tables.
+  function applyFilter(input, table) {
+    if (!input || !table) { return; }
+    var q = (input.value || '').trim().toLowerCase();
+    var rows = table.querySelectorAll('tbody tr');
+    for (var i = 0; i < rows.length; i++) {
+      rows[i].hidden = q !== '' && rows[i].textContent.toLowerCase().indexOf(q) === -1;
+    }
+  }
+  function attachFilter(input, table) {
+    if (!input || !table) { return; }
+    input.addEventListener('input', function () { applyFilter(input, table); });
+  }
+  function makeSortable(table) {
+    if (!table) { return; }
+    var ths = table.querySelectorAll('thead th');
+    for (var i = 0; i < ths.length; i++) {
+      (function (idx, th) {
+        th.addEventListener('click', function () {
+          var tbody = table.querySelector('tbody');
+          var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
+          var asc = th.getAttribute('data-asc') !== 'true';
+          rows.sort(function (a, b) {
+            var x = a.children[idx] ? a.children[idx].textContent : '';
+            var y = b.children[idx] ? b.children[idx].textContent : '';
+            var nx = parseFloat(x), ny = parseFloat(y);
+            if (!isNaN(nx) && !isNaN(ny)) { return asc ? nx - ny : ny - nx; }
+            return asc ? x.localeCompare(y) : y.localeCompare(x);
+          });
+          for (var r = 0; r < rows.length; r++) { tbody.appendChild(rows[r]); }
+          th.setAttribute('data-asc', asc ? 'true' : 'false');
+        });
+      })(i, ths[i]);
+    }
+  }
+  makeSortable(el('results')); makeSortable(el('whois')); makeSortable(el('history'));
+  attachFilter(el('results-filter'), el('results'));
+  attachFilter(el('whois-filter'), el('whois'));
 
   loadPublicStatus();
   if (getToken()) { loadAuthed(); } else { showApp(false); }
