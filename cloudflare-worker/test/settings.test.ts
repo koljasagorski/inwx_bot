@@ -1,7 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { mergeSettings, expandCheckTargets, type Settings } from "../src/index";
+import { mergeSettings, expandCheckTargets, chunk, type Settings } from "../src/index";
 
-const base: Settings = { dryRun: true, apiDelayMs: 1000, expiryAlertDays: [30, 14, 7, 1] };
+const base: Settings = {
+  dryRun: true,
+  apiDelayMs: 1000,
+  expiryAlertDays: [30, 14, 7, 1],
+  renewalMode: "AUTORENEW",
+  period: "",
+  transferLock: true,
+};
 
 describe("mergeSettings", () => {
   it("returns the base when there is no override", () => {
@@ -15,6 +22,12 @@ describe("mergeSettings", () => {
   });
   it("accepts and sorts override thresholds", () => {
     expect(mergeSettings(base, { expiryAlertDays: [7, 60, 1] }).expiryAlertDays).toEqual([60, 7, 1]);
+  });
+  it("merges registration options", () => {
+    const merged = mergeSettings(base, { renewalMode: "AUTODELETE", transferLock: false, period: "2Y" });
+    expect(merged.renewalMode).toBe("AUTODELETE");
+    expect(merged.transferLock).toBe(false);
+    expect(merged.period).toBe("2Y");
   });
 });
 
@@ -31,5 +44,15 @@ describe("expandCheckTargets", () => {
   it("returns nothing without enough input", () => {
     expect(expandCheckTargets({})).toEqual([]);
     expect(expandCheckTargets({ keyword: "x" })).toEqual([]);
+  });
+});
+
+describe("chunk", () => {
+  it("splits into batches of the given size", () => {
+    expect(chunk([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
+  });
+  it("handles empty and exact multiples", () => {
+    expect(chunk([], 3)).toEqual([]);
+    expect(chunk([1, 2, 3, 4], 2)).toEqual([[1, 2], [3, 4]]);
   });
 });

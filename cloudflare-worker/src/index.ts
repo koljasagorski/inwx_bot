@@ -29,6 +29,10 @@ export interface Env {
   API_DELAY_MS?: string;
   DRY_RUN?: string;
   EXPIRY_ALERT_DAYS?: string;
+  RENEWAL_MODE?: string;
+  PERIOD?: string;
+  TRANSFER_LOCK?: string;
+  HEARTBEAT_URL?: string;
 }
 
 type Action = "skipped" | "purchased" | "purchase_failed" | "would_purchase" | "error";
@@ -109,6 +113,13 @@ const AUDIT_LIMIT = 100;
 const THROTTLE_PREFIX = "throttle:";
 const THROTTLE_MAX = 10;
 const THROTTLE_WINDOW_SECONDS = 300;
+/** Domains per `domain.check` call (one subrequest per chunk). */
+const CHECK_BATCH_SIZE = 30;
+// Cron schedules (must match wrangler.toml). The availability check and the
+// WHOIS refresh run in separate invocations so each gets its own subrequest
+// budget; any other/unknown cron value runs both as a safe fallback.
+const RUN_CRON = "0 6 * * *";
+const WHOIS_CRON = "30 6 * * *";
 
 /** Actions that are worth a notification when a domain first reaches them. */
 const INTERESTING_ACTIONS: Action[] = ["would_purchase", "purchased", "purchase_failed", "error"];
@@ -118,6 +129,10 @@ interface Settings {
   dryRun: boolean;
   apiDelayMs: number;
   expiryAlertDays: number[];
+  /** Registration options applied to domain.create. */
+  renewalMode: string;
+  period: string;
+  transferLock: boolean;
 }
 
 /** Partial overrides stored in KV via the dashboard settings panel. */
@@ -125,6 +140,9 @@ interface SettingsOverride {
   dryRun?: boolean;
   apiDelayMs?: number;
   expiryAlertDays?: number[];
+  renewalMode?: string;
+  period?: string;
+  transferLock?: boolean;
 }
 
 interface AuditEntry {
@@ -226,6 +244,11 @@ function envSettings(env: Env): Settings {
     dryRun: isTrue(env.DRY_RUN),
     apiDelayMs: env.API_DELAY_MS ? Number(env.API_DELAY_MS) : 1000,
     expiryAlertDays: parseThresholds(env.EXPIRY_ALERT_DAYS),
+    // Conservative registration defaults: auto-renew so a domain isn't lost,
+    // and lock transfers unless the user opts out.
+    renewalMode: env.RENEWAL_MODE || "AUTORENEW",
+    period: env.PERIOD ?? "",
+    transferLock: env.TRANSFER_LOCK !== undefined ? isTrue(env.TRANSFER_LOCK) : true,
   };
 }
 
@@ -240,6 +263,9 @@ function mergeSettings(base: Settings, ov: SettingsOverride): Settings {
       Array.isArray(ov.expiryAlertDays) && ov.expiryAlertDays.length > 0
         ? ov.expiryAlertDays.filter((n) => Number.isFinite(n) && n >= 0).sort((a, b) => b - a)
         : base.expiryAlertDays,
+    renewalMode: typeof ov.renewalMode === "string" && ov.renewalMode ? ov.renewalMode : base.renewalMode,
+    period: typeof ov.period === "string" ? ov.period : base.period,
+    transferLock: typeof ov.transferLock === "boolean" ? ov.transferLock : base.transferLock,
   };
 }
 
@@ -285,6 +311,12 @@ function expandCheckTargets(input: { domain?: string; keyword?: string; tlds?: s
   const tlds = (input.tlds ?? []).map((t) => String(t).trim().replace(/^\./, "").toLowerCase()).filter(Boolean);
   if (!keyword || tlds.length === 0) return [];
   return tlds.map((tld) => `${keyword}.${tld}`);
+}
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
 }
 
 async function appendHistory(env: Env, summary: RunSummary): Promise<void> {
@@ -376,7 +408,12 @@ async function notify(env: Env, text: string, extra: Record<string, unknown> = {
   await Promise.all([sendWebhook(env, text, extra), sendTelegram(env, text)]);
 }
 
-function buyParamsFor(domain: string, accountInfo: AccountInfo, ns: string[]): Record<string, unknown> {
+function buyParamsFor(
+  domain: string,
+  accountInfo: AccountInfo,
+  ns: string[],
+  reg: Pick<Settings, "renewalMode" | "period" | "transferLock">,
+): Record<string, unknown> {
   const params: Record<string, unknown> = {
     domain,
     registrant: accountInfo.defaultRegistrant,
@@ -385,18 +422,22 @@ function buyParamsFor(domain: string, accountInfo: AccountInfo, ns: string[]): R
     billing: accountInfo.defaultBilling,
   };
   if (ns.length > 0) params.ns = ns;
+  if (reg.renewalMode) params.renewalMode = reg.renewalMode;
+  if (reg.period) params.period = reg.period;
+  params.transferLock = reg.transferLock;
   return params;
 }
 
 async function processDomain(
   client: InwxClient,
   cfg: DomainConfig,
+  check: { avail: boolean; price: number | null },
   accountInfo: AccountInfo,
   ns: string[],
-  dryRun: boolean,
+  settings: Settings,
 ): Promise<DomainStatus> {
   const domain = cfg.domain;
-  const { avail, price } = await client.checkDomain(domain);
+  const { avail, price } = check;
   const priceNote = price !== null ? ` (Preis ${price})` : "";
   const notBought = (detail: string): DomainStatus => ({
     domain,
@@ -413,13 +454,13 @@ async function processDomain(
   }
   // Available — decide whether to actually register it.
   if (cfg.mode === "watch") return notBought(`watch-only${priceNote}`);
-  if (dryRun) return notBought(`dry run – not purchased${priceNote}`);
+  if (settings.dryRun) return notBought(`dry run – not purchased${priceNote}`);
   if (cfg.maxPrice !== undefined) {
     if (price === null) return notBought(`price unknown – skipped (max ${cfg.maxPrice})`);
     if (price > cfg.maxPrice) return notBought(`over budget – ${price} > max ${cfg.maxPrice}`);
   }
 
-  const { success, code, msg } = await client.buyDomain(buyParamsFor(domain, accountInfo, ns));
+  const { success, code, msg } = await client.buyDomain(buyParamsFor(domain, accountInfo, ns, settings));
   if (success) {
     return { domain, available: true, action: "purchased", detail: `success${priceNote}`, api_code: code ?? null, api_msg: msg, price };
   }
@@ -430,7 +471,6 @@ async function runCheck(env: Env, settings: Settings): Promise<DomainStatus[]> {
   if (!env.INWX_USERNAME || !env.INWX_PASSWORD) {
     throw new Error("INWX_USERNAME or INWX_PASSWORD is not configured");
   }
-  const dryRun = settings.dryRun;
   const delayMs = settings.apiDelayMs;
   const client = new InwxClient(env.INWX_API_URL || LIVE_API_URL);
   const statuses: DomainStatus[] = [];
@@ -444,11 +484,29 @@ async function runCheck(env: Env, settings: Settings): Promise<DomainStatus[]> {
     const ns = [env.INWX_NS1, env.INWX_NS2].filter((v): v is string => Boolean(v));
     const configs = await loadDomainConfigs(env);
 
+    // Availability is checked in batches (one subrequest per chunk) instead of
+    // one call per domain — this is what keeps large lists under the limits.
+    const checks = new Map<string, { avail: boolean; price: number | null }>();
+    const batches = chunk(
+      configs.map((c) => c.domain),
+      CHECK_BATCH_SIZE,
+    );
+    for (let b = 0; b < batches.length; b++) {
+      if (b > 0 && delayMs > 0) await sleep(delayMs);
+      const batchResult = await client.checkDomains(batches[b]);
+      batchResult.forEach((value, key) => checks.set(key, value));
+    }
+
     for (let i = 0; i < configs.length; i++) {
-      if (i > 0 && delayMs > 0) await sleep(delayMs);
       const cfg = configs[i];
+      const check = checks.get(cfg.domain.toLowerCase()) ?? { avail: false, price: null };
       try {
-        const status = await processDomain(client, cfg, accountInfo, ns, dryRun);
+        // Only registrations make a further API call, so a small delay between
+        // them is enough; pure look-ups already happened in the batch above.
+        if (i > 0 && delayMs > 0 && check.avail && cfg.mode === "auto" && !settings.dryRun) {
+          await sleep(delayMs);
+        }
+        const status = await processDomain(client, cfg, check, accountInfo, ns, settings);
         statuses.push(status);
         console.log(`[${i + 1}/${configs.length}] ${cfg.domain} -> ${status.action}`);
       } catch (e) {
@@ -486,7 +544,8 @@ async function buyDomainNow(
     if (!avail) return { ok: false, action: "skipped", detail: "not available", price };
     const accountInfo = await client.getAccountInfo();
     const ns = [env.INWX_NS1, env.INWX_NS2].filter((v): v is string => Boolean(v));
-    const { success, code, msg } = await client.buyDomain(buyParamsFor(domain, accountInfo, ns));
+    const settings = await loadSettings(env);
+    const { success, code, msg } = await client.buyDomain(buyParamsFor(domain, accountInfo, ns, settings));
     if (success) {
       await markDomainPurchased(env, domain, price);
       await notify(env, `INWX-Bot: Domain registriert – ${domain}${price !== null ? ` (Preis ${price})` : ""}`);
@@ -533,24 +592,24 @@ async function runAdhocCheck(env: Env, targets: string[]): Promise<CheckResult[]
   }
   const settings = await loadSettings(env);
   const client = new InwxClient(env.INWX_API_URL || LIVE_API_URL);
-  const out: CheckResult[] = [];
   let loggedIn = false;
   try {
     await client.login(env.INWX_USERNAME, env.INWX_PASSWORD, env.INWX_SHARED_SECRET);
     loggedIn = true;
-    for (let i = 0; i < targets.length; i++) {
-      if (i > 0 && settings.apiDelayMs > 0) await sleep(settings.apiDelayMs);
-      try {
-        const { avail, price } = await client.checkDomain(targets[i]);
-        out.push({ domain: targets[i], available: avail, price });
-      } catch (e) {
-        out.push({ domain: targets[i], error: e instanceof Error ? e.message : String(e) });
-      }
+    const checks = new Map<string, { avail: boolean; price: number | null }>();
+    const batches = chunk(targets, CHECK_BATCH_SIZE);
+    for (let b = 0; b < batches.length; b++) {
+      if (b > 0 && settings.apiDelayMs > 0) await sleep(settings.apiDelayMs);
+      const result = await client.checkDomains(batches[b]);
+      result.forEach((value, key) => checks.set(key, value));
     }
+    return targets.map((domain) => {
+      const c = checks.get(domain.toLowerCase());
+      return c ? { domain, available: c.avail, price: c.price } : { domain, error: "no result" };
+    });
   } finally {
     if (loggedIn) await client.logout().catch(() => {});
   }
-  return out;
 }
 
 const ACTION_LABELS_DE: Record<Action, string> = {
@@ -897,6 +956,9 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         const days = body.expiryAlertDays.map(Number).filter((n) => Number.isFinite(n) && n >= 0);
         if (days.length > 0) override.expiryAlertDays = days;
       }
+      if (typeof body.renewalMode === "string" && body.renewalMode) override.renewalMode = body.renewalMode;
+      if (typeof body.period === "string") override.period = body.period;
+      if (typeof body.transferLock === "boolean") override.transferLock = body.transferLock;
       await env.INWX_BOT.put(SETTINGS_KEY, JSON.stringify(override));
       await audit(env, request, "settings.save", JSON.stringify(override));
       return json({ ok: true, override, effective: await loadSettings(env) });
@@ -941,17 +1003,38 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
   return json({ error: "not found" }, 404);
 }
 
+/** Dead-man's-switch ping: an external monitor alerts if these stop arriving. */
+async function pingHeartbeat(env: Env): Promise<void> {
+  if (!env.HEARTBEAT_URL) return;
+  try {
+    await fetch(env.HEARTBEAT_URL, { method: "GET" });
+  } catch {
+    // best-effort
+  }
+}
+
 export default {
-  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    // Run the availability check, then refresh WHOIS data (sequentially, so we
-    // never hold two INWX sessions at once). A lock guards against overlap with
-    // a manually triggered run.
-    ctx.waitUntil(
-      withLock(env, async () => {
+  async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Split the work across cron triggers so each invocation gets its own
+    // subrequest budget. Unknown cron values fall back to running both.
+    let task: () => Promise<void>;
+    if (event.cron === RUN_CRON) {
+      task = async () => {
+        await runAndStore(env);
+      };
+    } else if (event.cron === WHOIS_CRON) {
+      task = async () => {
+        await refreshWhois(env);
+      };
+    } else {
+      task = async () => {
         await runAndStore(env);
         await refreshWhois(env);
-      }).then(() => undefined),
-    );
+      };
+    }
+    // A lock guards against overlap with a manual run; the heartbeat fires
+    // afterwards regardless, so a stalled cron is detected externally.
+    ctx.waitUntil(withLock(env, task).then(() => pingHeartbeat(env)));
   },
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     return handleFetch(request, env, ctx);
@@ -969,5 +1052,6 @@ export {
   daysUntil,
   mergeSettings,
   expandCheckTargets,
+  chunk,
 };
 export type { DomainConfig, DomainStatus, Action, StateMap, Settings, SettingsOverride };
