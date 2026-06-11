@@ -188,6 +188,15 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
         <label class="srow"><span>Probelauf (DRY_RUN) – kauft nichts</span><input id="set-dryrun" type="checkbox" /></label>
         <label class="srow"><span>API-Delay (ms)</span><input id="set-delay" type="number" min="0" /></label>
         <label class="srow"><span>Ablauf-Schwellen (Tage, kommagetrennt)</span><input id="set-thresholds" type="text" placeholder="30,14,7,1" /></label>
+        <label class="srow"><span>Verlängerungsmodus (renewalMode)</span>
+          <select id="set-renewal">
+            <option value="AUTORENEW">AUTORENEW</option>
+            <option value="AUTODELETE">AUTODELETE</option>
+            <option value="AUTOEXPIRE">AUTOEXPIRE</option>
+          </select>
+        </label>
+        <label class="srow"><span>Registrierungsdauer (period, optional)</span><input id="set-period" type="text" placeholder="z. B. 1Y" /></label>
+        <label class="srow"><span>Transfer-Sperre (transferLock)</span><input id="set-lock" type="checkbox" /></label>
       </div>
       <div class="actions mt">
         <button id="save-settings" class="btn btn-primary">Einstellungen speichern</button>
@@ -518,6 +527,9 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
       el('set-dryrun').checked = !!s.dryRun;
       el('set-delay').value = (s.apiDelayMs !== undefined && s.apiDelayMs !== null) ? s.apiDelayMs : '';
       el('set-thresholds').value = (s.expiryAlertDays || []).join(',');
+      el('set-renewal').value = s.renewalMode || 'AUTORENEW';
+      el('set-period').value = s.period || '';
+      el('set-lock').checked = s.transferLock !== false;
     });
   }
 
@@ -660,6 +672,9 @@ footer{max-width:980px;margin:0 auto;padding:8px 20px 28px;color:var(--muted);fo
     if (delay !== '') { var d = Number(delay); if (!isNaN(d)) { override.apiDelayMs = d; } }
     var th = el('set-thresholds').value.trim();
     if (th !== '') { override.expiryAlertDays = th.split(',').map(function (x) { return Number(x.trim()); }).filter(function (n) { return !isNaN(n); }); }
+    override.renewalMode = el('set-renewal').value;
+    override.period = el('set-period').value.trim();
+    override.transferLock = el('set-lock').checked;
     var btn = this; btn.disabled = true;
     var msg = el('settings-msg'); show(msg, true); msg.textContent = 'Speichere…';
     api('/api/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(override) })

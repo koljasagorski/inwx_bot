@@ -7,12 +7,16 @@ Workers), and stores the domain list and results in **Workers KV**.
 
 ## How it works
 
-- A **Cron Trigger** invokes the Worker on a schedule (default: daily 06:00 UTC).
-- It logs in to INWX and checks each domain from the KV list with `domain.check`.
-  Each domain has a **mode**: `auto` registers it when free (unless `DRY_RUN`),
-  `watch` only reports. An optional per-domain **max price** skips auto-purchase
-  when the INWX price exceeds the budget. You can also buy an available domain
-  on demand from the dashboard ("Kaufen").
+- Two **Cron Triggers** invoke the Worker: one runs the availability check
+  (default 06:00 UTC), the other refreshes WHOIS (06:30 UTC). Splitting them
+  keeps each invocation within Cloudflare's per-request subrequest limit.
+- It logs in to INWX and checks the domains from the KV list with `domain.check`
+  in **batches** (one subrequest per ~30 domains). Each domain has a **mode**:
+  `auto` registers it when free (unless `DRY_RUN`), `watch` only reports. An
+  optional per-domain **max price** skips auto-purchase when the INWX price
+  exceeds the budget. You can also buy an available domain on demand ("Kaufen").
+- Registrations use configurable options (`renewalMode`, `period`,
+  `transferLock`) — defaulting to auto-renew + transfer-locked.
 - Results are written to KV (`results:latest.json` and `results:latest.csv`).
 - It also refreshes **WHOIS/registration metadata** per domain (registered /
   expires / last changed / status) and stores it in KV (`whois:latest.json`).
@@ -25,6 +29,8 @@ Workers), and stores the domain list and results in **Workers KV**.
   failed, or a new run error), not on every run, plus **expiry alerts** as
   owned domains approach their renewal date (`EXPIRY_ALERT_DAYS` thresholds).
 - A best-effort KV **lock** prevents a manual run from overlapping the cron run.
+- An optional **heartbeat** (`HEARTBEAT_URL`) is pinged after every cron run, so
+  an external dead-man's-switch (e.g. healthchecks.io) can alert if it stalls.
 
 > **Safety first:** `DRY_RUN` defaults to `"true"`, so out of the box the bot
 > only *reports* available domains and never spends money. Set it to `"false"`
@@ -89,16 +95,22 @@ Non-secret settings live in `wrangler.toml` under `[vars]`:
 | `API_DELAY_MS`     | `"1000"`                             | Delay between API calls (rate limiting).      |
 | `INWX_API_URL`     | `https://api.domrobot.com/jsonrpc/`  | Set to the OT&E URL to test against sandbox.   |
 | `EXPIRY_ALERT_DAYS`| `"30,14,7,1"`                        | Days-before-expiry thresholds for alerts.     |
+| `RENEWAL_MODE`     | `"AUTORENEW"`                        | `domain.create` renewal mode.                 |
+| `TRANSFER_LOCK`    | `"true"`                             | Lock transfers on newly registered domains.   |
+| `PERIOD`           | —                                    | Registration period (e.g. `1Y`); empty = min. |
 
 Secrets (set with `wrangler secret put`): `INWX_USERNAME`, `INWX_PASSWORD`,
 `ADMIN_TOKEN`, and the optional `INWX_SHARED_SECRET`, `NOTIFY_WEBHOOK_URL`,
 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (Telegram notifications),
-`INWX_NS1`, `INWX_NS2`.
+`HEARTBEAT_URL` (dead-man's-switch ping), `INWX_NS1`, `INWX_NS2`.
 
 Notifications are sent to every configured channel (Slack/Discord webhook and/or
 Telegram). Responses carry a strict CSP and `X-Content-Type-Options: nosniff`.
+Registration options and the runtime settings above can also be changed from the
+dashboard without a redeploy.
 
-The schedule is controlled by the `crons` array in `wrangler.toml`.
+The schedule is the two-entry `crons` array in `wrangler.toml` (run + WHOIS);
+keep it in sync with `RUN_CRON` / `WHOIS_CRON` in `src/index.ts`.
 
 ## Dashboard
 

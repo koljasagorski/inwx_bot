@@ -116,14 +116,36 @@ export class InwxClient {
    * Check availability and (best-effort) price in a single `domain.check`.
    * `price` is null when INWX does not return one for this domain.
    */
+  private static priceFromEntry(entry: Record<string, unknown>): number | null {
+    const raw = entry.price ?? entry.checkPrice ?? null;
+    if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+    if (typeof raw === "string" && raw.trim() !== "" && Number.isFinite(Number(raw))) return Number(raw);
+    return null;
+  }
+
   async checkDomain(domain: string): Promise<{ avail: boolean; price: number | null }> {
     const result = await this.call("domain.check", { domain }, "during domain check");
     const entry = (result.resData as { domain?: Array<Record<string, unknown>> } | undefined)?.domain?.[0] ?? {};
-    const raw = entry.price ?? entry.checkPrice ?? null;
-    let price: number | null = null;
-    if (typeof raw === "number" && Number.isFinite(raw)) price = raw;
-    else if (typeof raw === "string" && raw.trim() !== "" && Number.isFinite(Number(raw))) price = Number(raw);
-    return { avail: Boolean(entry.avail), price };
+    return { avail: Boolean(entry.avail), price: InwxClient.priceFromEntry(entry) };
+  }
+
+  /**
+   * Check several domains in a single `domain.check` call (INWX accepts a list),
+   * cutting one subrequest per domain down to one per call. Results are keyed by
+   * lowercased domain name.
+   */
+  async checkDomains(domains: string[]): Promise<Map<string, { avail: boolean; price: number | null }>> {
+    const out = new Map<string, { avail: boolean; price: number | null }>();
+    if (domains.length === 0) return out;
+    const result = await this.call("domain.check", { domain: domains }, "during domain check");
+    const entries = (result.resData as { domain?: Array<Record<string, unknown>> } | undefined)?.domain ?? [];
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      const name = typeof entry.domain === "string" && entry.domain ? entry.domain : domains[i];
+      if (!name) continue;
+      out.set(name.toLowerCase(), { avail: Boolean(entry.avail), price: InwxClient.priceFromEntry(entry) });
+    }
+    return out;
   }
 
   async isDomainFree(domain: string): Promise<boolean> {
